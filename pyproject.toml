@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rbccps-od"
+version = "0.1.0"
+description = "Nighttime streetlight object-detection package with baseline YOLOv26 and modular advanced pipeline hooks."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "pillow>=10.0.0",
+  "fastapi>=0.111.0",
+  "pydantic>=2.7.0",
+  "SQLAlchemy>=2.0.30",
+  "uvicorn[standard]>=0.30.0",
+  "PyYAML>=6.0.0",
+  "psutil>=5.9.0",
+]
+
+[project.optional-dependencies]
+train = ["ultralytics>=8.2.0", "pillow>=10.0.0", "wandb>=0.17.0"]
+measurement = ["numpy>=1.26.0", "pillow>=10.0.0", "opencv-python>=4.9.0", "torch>=2.3.0"]
+annotator = ["opencv-python>=4.9.0", "numpy>=1.26.0"]
+dev = ["pytest>=8.0.0"]
+
+[project.scripts]
+rbccps-measurement = "rbccps_measurement.cli.main:main"
+rbccps-annotator = "rbccps_annotator.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+rbccps_annotator = ["static/*.html", "static/*.css", "static/*.js"]
+
+[tool.pyright]
+extraPaths = ["."]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]

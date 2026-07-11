@@ -1,0 +1,10 @@
+path: datasets/processed/original-yolo26m
+
+train: images/train
+val: images/val
+test: images/test
+nc: 2
+
+names:
+  0: lamp
+  1: pole

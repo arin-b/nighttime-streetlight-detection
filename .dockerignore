@@ -1,0 +1,17 @@
+.git
+.dashboard
+.cache
+.pytest_cache
+.ruff_cache
+__pycache__
+*.pyc
+streetlight-env
+datasets/raw
+datasets/extracted_frames
+datasets/imported
+datasets/derived
+datasets/processed
+runs
+runs1
+models
+_ultralytics_config

@@ -1,6 +1,6 @@
 runs/
 
-nighttime_streetlight_detection_env/
+.nighttime_streetlight_detection_env/
 datasets/
 configs/
 models/
