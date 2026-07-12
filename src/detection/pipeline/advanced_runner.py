@@ -45,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enable-tracking", action="store_true")
     parser.add_argument("--enable-multicue", action="store_true")
     parser.add_argument("--aggregation-threshold", type=float, default=0.5)
-    parser.add_argument("--tracker", default="bytetrack.yaml")
+    parser.add_argument("--tracker", default="botsort.yaml")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 

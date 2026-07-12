@@ -12,7 +12,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from audit_pipeline.config import MeasurementConfig
+from evaluation.eval_pres.audit_config import MeasurementConfig
 
 
 @dataclass

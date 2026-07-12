@@ -1,7 +1,7 @@
 """Main orchestrator — single entry point for the audit pipeline.
 
 Usage:
-    python -m audit_pipeline.run_audit \
+    python -m evaluation.eval_pres.run_audit \
         --video /path/to/video.mp4 \
         --model /path/to/best.pt \
         [--gt-labels /path/to/labels/] \
@@ -31,7 +31,7 @@ from typing import Any, TypedDict
 import cv2
 import numpy as np
 
-from audit_pipeline.config import (
+from evaluation.eval_pres.audit_config import (
     AggregationConfig,
     AuditPipelineConfig,
     DEFAULT_STREETLIGHT_TARGET_LABELS,
@@ -42,29 +42,24 @@ from audit_pipeline.config import (
     MultiCueConfig,
     TrackerConfig,
 )
-from audit_pipeline.detector import load_model, resolve_target_classes, stream_video_with_tracking
-from audit_pipeline.tracker import write_tracker_config
-from audit_pipeline.multicue_filter import (
+from detection.models.audit_detector import load_model, resolve_target_classes, stream_video_with_tracking
+from detection.pipeline.audit_tracker import write_tracker_config
+from detection.pipeline.audit_multicue import (
     FilterResult,
     duplicate_removal,
     filter_frame_detections,
     temporal_consistency_filter,
 )
-from audit_pipeline.measurement import LampMeasurement, measure_lamp
-from audit_pipeline.aggregator import AggregatedLamp, aggregate_measurements
-from audit_pipeline.evaluator import (
-    DetectionMetrics,
-    StatusClassificationMetrics,
-    compute_map,
-    evaluate_frame_detections,
-    load_gt_boxes_yolo,
-)
-from audit_pipeline.report_generator import (
+from evaluation.eval_pres.measurement import LampMeasurement, measure_lamp
+from evaluation.eval_pres.aggregator import AggregatedLamp, aggregate_measurements
+from evaluation.eval_pres.schemas import BoxRecord
+from evaluation.eval_pres.metrics import match_predictions, _average_precision
+from evaluation.eval_pres.report_generator import (
     write_csv_report,
     write_json_report,
     write_markdown_report,
 )
-from audit_pipeline.location_prior import (
+from evaluation.eval_pres.location_prior import (
     IMPLEMENTATION as LOCATION_PRIOR_IMPLEMENTATION,
     LocationPriorSettings,
     LocationPriorStore,
@@ -122,7 +117,7 @@ def parse_args() -> argparse.Namespace:
 
     # ── Tracker ──────────────────────────────────────────────────────
     p.add_argument("--tracker", default="botsort",
-                   choices=["botsort", "bytetrack"],
+                   choices=["botsort", "ucmc"],
                    help="Tracker type.")
     p.add_argument("--track-buffer", type=int, default=30,
                    help="Tracker lost-track buffer (frames).")
@@ -284,6 +279,41 @@ def build_config(args: argparse.Namespace) -> AuditPipelineConfig:
             existence_confidence_threshold=args.prior_existence_threshold,
         ),
     )
+
+
+# ================================================================== #
+# Evaluation helpers                                                  #
+# ================================================================== #
+
+def load_gt_boxes_yolo(
+    labels_dir: str | Path,
+    frame_index: int,
+    vid_stride: int,
+    frame_width: int,
+    frame_height: int,
+) -> list[list[float]]:
+    """Load YOLO-format ground-truth boxes for a given frame."""
+    labels_dir = Path(labels_dir)
+    actual_frame = ((frame_index - 1) * max(1, vid_stride)) + 1
+    label_path = labels_dir / f"frame_{actual_frame:06d}.txt"
+
+    if not label_path.exists():
+        return []
+
+    boxes = []
+    for line in label_path.read_text(encoding="utf-8").strip().splitlines():
+        parts = line.strip().split()
+        if len(parts) < 5:
+            continue
+        _, xc, yc, w, h = float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
+        # Convert normalised xywh → pixel xyxy
+        x1 = (xc - w / 2) * frame_width
+        y1 = (yc - h / 2) * frame_height
+        x2 = (xc + w / 2) * frame_width
+        y2 = (yc + h / 2) * frame_height
+        boxes.append([x1, y1, x2, y2])
+
+    return boxes
 
 
 # ================================================================== #
@@ -901,33 +931,52 @@ def main() -> None:
     if gt_labels_dir and all_gt_boxes:
         print("[5/6] Computing evaluation metrics...")
 
-        # Detection mAP (on filtered predictions)
-        map_results = compute_map(
-            all_pred_boxes_filtered,
-            all_pred_scores_filtered,
-            all_gt_boxes,
-            cfg.evaluation.iou_thresholds,
-        )
+        # Build BoxRecords for eval_pres
+        gt_records = []
+        for frame_idx, boxes in enumerate(all_gt_boxes, start=1):
+            for box in boxes:
+                gt_records.append(BoxRecord(frame_id=frame_idx, bbox_xyxy=tuple(box)))
+                
+        pred_records_filtered = []
+        for frame_idx, (boxes, scores) in enumerate(zip(all_pred_boxes_filtered, all_pred_scores_filtered), start=1):
+            for box, score in zip(boxes, scores):
+                pred_records_filtered.append(BoxRecord(frame_id=frame_idx, bbox_xyxy=tuple(box), score=score))
+                
+        pred_records_raw = []
+        for frame_idx, (boxes, scores) in enumerate(zip(all_pred_boxes_raw, all_pred_scores_raw), start=1):
+            for box, score in zip(boxes, scores):
+                pred_records_raw.append(BoxRecord(frame_id=frame_idx, bbox_xyxy=tuple(box), score=score))
 
-        # Aggregate frame-level detection metrics at IoU=0.5
-        agg_det = DetectionMetrics(iou_threshold=0.5)
-        for pred_b, pred_s, gt_b in zip(
-            all_pred_boxes_filtered, all_pred_scores_filtered, all_gt_boxes
-        ):
-            frame_det = evaluate_frame_detections(pred_b, pred_s, gt_b, 0.5)
-            agg_det.tp += frame_det.tp
-            agg_det.fp += frame_det.fp
-            agg_det.fn += frame_det.fn
+        # Detection mAP
+        ap_50 = _average_precision(tuple(pred_records_filtered), tuple(gt_records), 0.5) or 0.0
+        aps = []
+        for t in cfg.evaluation.iou_thresholds:
+            aps.append(_average_precision(tuple(pred_records_filtered), tuple(gt_records), t) or 0.0)
+            
+        map_results = {
+            "AP@0.5": round(ap_50, 4),
+            "mAP@0.5:0.95": round(sum(aps)/len(aps), 4) if aps else 0.0,
+            "per_threshold_AP": {f"{t:.2f}": round(ap, 4) for t, ap in zip(cfg.evaluation.iou_thresholds, aps)},
+        }
 
-        # Before-filtering metrics for comparison
-        agg_before = DetectionMetrics(iou_threshold=0.5)
-        for pred_b, pred_s, gt_b in zip(
-            all_pred_boxes_raw, all_pred_scores_raw, all_gt_boxes
-        ):
-            frame_det = evaluate_frame_detections(pred_b, pred_s, gt_b, 0.5)
-            agg_before.tp += frame_det.tp
-            agg_before.fp += frame_det.fp
-            agg_before.fn += frame_det.fn
+        # Frame detection metrics
+        def _calc_det_metrics(preds: list[BoxRecord], gts: list[BoxRecord]) -> dict[str, Any]:
+            matches = match_predictions(tuple(preds), tuple(gts), 0.5)
+            tp = sum(1 for m in matches if m.gt_index is not None)
+            fp = sum(1 for m in matches if m.gt_index is None)
+            fn = len(gts) - tp
+            return {
+                "iou_threshold": 0.5,
+                "tp": tp,
+                "fp": fp,
+                "fn": fn,
+                "precision": round(tp / (tp + fp) if (tp + fp) else 0.0, 4),
+                "recall": round(tp / (tp + fn) if (tp + fn) else 0.0, 4),
+                "f1": round(2 * tp / (2 * tp + fp + fn) if (2 * tp + fp + fn) else 0.0, 4),
+            }
+
+        agg_det_dict = _calc_det_metrics(pred_records_filtered, gt_records)
+        agg_before_dict = _calc_det_metrics(pred_records_raw, gt_records)
 
         total_gt_instances = sum(len(gt) for gt in all_gt_boxes)
         raw_prediction_instances = sum(len(pred) for pred in all_pred_boxes_raw)
@@ -955,18 +1004,18 @@ def main() -> None:
                 ),
             },
             "detection": map_results,
-            "frame_detection": agg_det.to_dict(),
+            "frame_detection": agg_det_dict,
             "before_after_filtering": {
-                "before": agg_before.to_dict(),
-                "after": agg_det.to_dict(),
+                "before": agg_before_dict,
+                "after": agg_det_dict,
             },
             "frame_instance_counts": {
                 "ground_truth_instances": total_gt_instances,
                 "filtered_prediction_instances": filtered_prediction_instances,
                 "count_error_pct": round(count_error_pct, 2),
-                "matched_instances_tp_at_iou_0_5": agg_det.tp,
-                "extra_instances_fp_at_iou_0_5": agg_det.fp,
-                "missed_instances_fn_at_iou_0_5": agg_det.fn,
+                "matched_instances_tp_at_iou_0_5": agg_det_dict["tp"],
+                "extra_instances_fp_at_iou_0_5": agg_det_dict["fp"],
+                "missed_instances_fn_at_iou_0_5": agg_det_dict["fn"],
             },
         }
 
@@ -979,7 +1028,7 @@ def main() -> None:
                 for row in reader:
                     gt_statuses[row["lamp_id"]] = row["status"]
 
-            status_metrics = StatusClassificationMetrics()
+            status_tp, status_fp, status_tn, status_fn = 0, 0, 0, 0
             for lamp in lamps:
                 gt_status = gt_statuses.get(lamp.track_id)
                 if gt_status is None:
@@ -987,15 +1036,26 @@ def main() -> None:
                 pred_working = lamp.status == "working"
                 gt_working = gt_status.lower() in ("working", "on", "1", "true")
                 if pred_working and gt_working:
-                    status_metrics.tp += 1
+                    status_tp += 1
                 elif pred_working and not gt_working:
-                    status_metrics.fp += 1
+                    status_fp += 1
                 elif not pred_working and not gt_working:
-                    status_metrics.tn += 1
+                    status_tn += 1
                 else:
-                    status_metrics.fn += 1
+                    status_fn += 1
 
-            eval_metrics["status_classification"] = status_metrics.to_dict()
+            eval_metrics["status_classification"] = {
+                "accuracy": round((status_tp + status_tn) / max(1, status_tp + status_fp + status_tn + status_fn), 4),
+                "precision": round(status_tp / max(1, status_tp + status_fp), 4),
+                "recall": round(status_tp / max(1, status_tp + status_fn), 4),
+                "f1": round(2 * status_tp / max(1, 2 * status_tp + status_fp + status_fn), 4),
+                "confusion_matrix": {
+                    "tp": status_tp,
+                    "fp": status_fp,
+                    "tn": status_tn,
+                    "fn": status_fn,
+                },
+            }
 
         print(f"       mAP@0.5: {map_results['AP@0.5']}")
         print(f"       mAP@0.5:0.95: {map_results['mAP@0.5:0.95']}")

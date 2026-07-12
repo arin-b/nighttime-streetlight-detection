@@ -14,14 +14,14 @@ from typing import TYPE_CHECKING
 import cv2
 import numpy as np
 
-from audit_pipeline.config import MultiCueConfig
+from evaluation.eval_pres.audit_config import MultiCueConfig
 from rbccps_od.config.schemas import CueWeights
 from rbccps_od.domain.cues import CueScore
 from rbccps_od.pipeline.aggregator import weighted_aggregate
 from rbccps_od.pipeline.thresholding import threshold_score
 
 if TYPE_CHECKING:
-    from audit_pipeline.run_audit import Detection
+    from evaluation.eval_pres.run_audit import Detection
 
 
 # ------------------------------------------------------------------ #
@@ -50,12 +50,25 @@ def _trajectory_cue(history_len: int) -> CueScore:
     return CueScore(name="trajectory", value=score, weight=1.0, metadata={"history_len": history_len})
 
 
-def _size_progression_cue(xyxy: list[float]) -> CueScore:
-    x1, y1, x2, y2 = xyxy
-    width = max(x2 - x1, 0.0)
-    height = max(y2 - y1, 0.0)
-    score = 1.0 if width > 0.0 and height > 0.0 else 0.0
-    return CueScore(name="size_progression", value=score, weight=1.0, metadata={"w": width, "h": height})
+def _size_progression_cue(history: list[list[float]]) -> CueScore:
+    areas = []
+    for xyxy in history:
+        x1, y1, x2, y2 = xyxy
+        width = max(x2 - x1, 0.0)
+        height = max(y2 - y1, 0.0)
+        areas.append(width * height)
+
+    if len(areas) < 2:
+        score = 1.0 if (areas and areas[0] > 0) else 0.0
+    else:
+        ratios = [curr / prev if prev > 0 else 1.0 for prev, curr in zip(areas[:-1], areas[1:])]
+        ema = ratios[0]
+        alpha = 0.3
+        for r in ratios[1:]:
+            ema = alpha * r + (1 - alpha) * ema
+        score = 1.0 if ema >= 0.95 else max(0.0, ema / 0.95)
+        
+    return CueScore(name="size_progression", value=score, weight=1.0, metadata={"areas": areas})
 
 
 def _light_characteristics_cue(confidence: float) -> CueScore:
@@ -89,7 +102,7 @@ def _score_track(
 
     cues = [
         _trajectory_cue(history_len),
-        _size_progression_cue(xyxy),
+        _size_progression_cue(history),
         _light_characteristics_cue(confidence),
         _position_prior_cue(xyxy, frame_height),
     ]

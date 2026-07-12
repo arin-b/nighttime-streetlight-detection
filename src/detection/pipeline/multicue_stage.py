@@ -14,10 +14,23 @@ def trajectory_cue(track: Track) -> CueScore:
 
 
 def size_progression_cue(track: Track) -> CueScore:
-    w = track.bbox[2] if len(track.bbox) >= 4 else 0.0
-    h = track.bbox[3] if len(track.bbox) >= 4 else 0.0
-    score = 1.0 if w > 0 and h > 0 else 0.0
-    return CueScore(name="size_progression", value=score, weight=1.0, metadata={"w": w, "h": h})
+    areas = []
+    for box in track.history:
+        if len(box) >= 4:
+            # bbox is typically xywh or similar; w and h are usually at index 2 and 3
+            areas.append(max(0.0, box[2]) * max(0.0, box[3]))
+            
+    if len(areas) < 2:
+        score = 1.0 if (areas and areas[0] > 0) else 0.0
+    else:
+        ratios = [curr / prev if prev > 0 else 1.0 for prev, curr in zip(areas[:-1], areas[1:])]
+        ema = ratios[0]
+        alpha = 0.3
+        for r in ratios[1:]:
+            ema = alpha * r + (1 - alpha) * ema
+        score = 1.0 if ema >= 0.95 else max(0.0, ema / 0.95)
+        
+    return CueScore(name="size_progression", value=score, weight=1.0, metadata={"areas": areas})
 
 
 def light_characteristics_cue(track: Track) -> CueScore:

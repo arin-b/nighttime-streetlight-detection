@@ -1,124 +1,170 @@
-# RBCCPS Streetlight Auditing Project
+# Nighttime Streetlight Detection & Audit Pipeline
 
-## Overview
+A production-ready, modular computer vision pipeline designed for nighttime streetlight detection, tracking, measurement, and automated auditing. 
 
-This repository is a runnable research codebase for developing an automated streetlight auditing system based on computer vision. The target application is night-time assessment of streetlight condition and performance from road imagery and mobile video captured in urban environments.
+This project integrates advanced YOLOv26 detection with attention modules (Geometry, Channel Squeeze-Excitation, Negative Attention), multi-object tracking (BoT-SORT & UCMC), robust multi-cue temporal filtering, and photometric measurement to generate comprehensive infrastructure audit reports.
 
-The intended system is being developed for deployment in Bangalore under the municipal corporation of Bangalore. The broader objective is to support scalable infrastructure auditing by identifying streetlights, assessing whether they are functioning, and estimating the adequacy of the illumination they provide to roads and nearby public areas.
+---
 
-## Institutional Context
+## 🚀 Features
 
-This work is being carried out under RBCCPS, Indian Institute of Science (IISc).
+- **Advanced Detection Models**: YOLOv26 baseline with dynamically configurable attention modules (CSE, Geometry, Negative Masking).
+- **Ablation Framework**: Built-in W&B logging and orchestration for running complete module ablation studies.
+- **Robust Tracking**: Integration with BoT-SORT (and upcoming UCMC) for stable streetlight identity maintenance across frames.
+- **Multi-Cue Filtering**: Eradicates phantom detections using spatial priors, aspect-ratio consistency, brightness, and temporal stability checks.
+- **Photometric Measurement**: Real-time evaluation of streetlight brightness, status (Working, Off, Flickering), and illumination profiles.
+- **Location Prior**: GPS-aware memory system to correlate detected streetlights with known historical infrastructure data.
+- **Comprehensive Auditing**: End-to-end evaluation producing JSON, CSV, and Markdown audit reports with built-in mAP and F1 classification metrics.
 
-## Team
+---
 
-- Angad Singh Ahuja, Research Intern, RBCCPS, IISc
-- Arindam Bhaduri, Research Intern, RBCCPS, IISc
+## 🛠️ Setup & Installation
 
-## Academic Supervision
+### Prerequisites
+- Python 3.10+
+- PyTorch 2.3.0+
+- A CUDA-compatible GPU (recommended for real-time inference)
 
-The work is being conducted under the guidance of:
+### Installation
 
-- Prof. Prasant Misra
-- Prof. Pandrasamy Arjunan
+1. **Clone the repository and enter the directory**:
+   ```bash
+   git clone https://github.com/your-username/nighttime_streetlight_detection.git
+   cd nighttime_streetlight_detection
+   ```
 
-## Project Scope
+2. **Install the package and dependencies**:
+   The project uses `pyproject.toml`. Install the core package and all optional dependencies (`train`, `measurement`, `annotator`, `dev`) in editable mode:
+   ```bash
+   pip install -e ".[train,measurement,annotator,dev]"
+   ```
 
-The current repository contents indicate work across the following areas:
+3. **Verify installation**:
+   ```bash
+   python3 -c "import rbccps_od; print('Success!')"
+   ```
 
-- literature review on object detection, low-light enhancement, domain adaptation, tracking, illumination measurement, and streetlight-related auditing
-- dataset collection and organization for night-time road scenes and related imported image corpora
-- annotation automation scripts for rebuilding training corpora, review manifests, and detector handoff packages
-- system-design material for a streetlight auditing pipeline
-- measurement-block planning for estimating useful illumination from detected and tracked streetlights on edge devices such as mobile phones
+### Installation via Docker (Containerization)
 
-## Current Supported Workflow
+For the most reliable and consistent environment, you can build and run this repository inside a Docker container. The container comes pre-configured with PyTorch, CUDA, and OpenCV dependencies.
 
-The primary active workflow is the v3 local-night corpus path:
+1. **Build the Docker Image**:
+   ```bash
+   docker build -t streetlight-audit .
+   ```
 
-1. review local positives and negatives in `datasets/derived/annotation_click_review`
-2. sync those reviews into `datasets/derived/annotation_automation_v3`
-3. build the guarded v3 corpus
-4. train and compare v3 detector runs under `runs/`
+2. **Run the Container**:
+   You should mount your local `datasets`, `runs`, and weights directories so the container can access your data and save outputs persistently.
+   ```bash
+   docker run --gpus all -it --rm \
+       -v $(pwd)/runs:/app/runs \
+       -v $(pwd)/datasets:/app/datasets \
+       -v /path/to/your/weights:/app/weights \
+       streetlight-audit
+   ```
+   *Inside the container, you can then run any of the commands listed below!*
 
-The main entrypoints for that workflow are:
+---
 
-- [scripts/annotation_automation/README.md](scripts/annotation_automation/README.md)
-- [documentation/system_design/new_design/run3_accuracy_recovery_implementation.md](documentation/system_design/new_design/run3_accuracy_recovery_implementation.md)
-- [documentation/system_design/README.md](documentation/system_design/README.md)
+## 🧪 Training & Ablation Studies
 
-Retained older generations are still present because the v3 path depends on prior review outputs and corpus history, but they should be treated as supporting lineage rather than the default operating surface.
+The project includes an advanced training orchestrator to run ablation studies on the detection attention modules. 
 
-The package entrypoint for the refactored detector codebase is now:
+### Running a Specific Ablation Case
+You can train a specific model variant using `ablation.py`.
 
 ```bash
-python -m rbccps_od <command>
+python3 -m src.detection.training.ablation --experiment original --case baseline
 ```
 
-Primary detector commands:
+**Available Experiments**:
+- `original` (Baseline original images)
+- `zerodce` (Zero-DCE enhanced images)
+- `retinex` (Retinex decomposition)
 
-- `review-app`
-- `sync-v3-reviews`
-- `build-v3-corpus`
-- `train`
-- `validate`
-- `build-tiled`
-- `build-mixed`
-- `download-models`
-- `run-baseline`
-- `run-advanced-pipeline`
+**Available Cases**:
+- `baseline` (Standard YOLO)
+- `geometry` (Geometry-aware attention only)
+- `cse` (Channel Squeeze-Excitation only)
+- `geometry_cse` (Geometry + CSE)
+- `negative` (Negative Attention Mask only)
+- `negative_cse` (Negative + CSE)
+- `negative_geometry` (Negative + Geometry)
+- `all_modules` (All three attention modules active)
 
-## Repository Structure
+### 🚀 All-In-One Ablation Script
+To run an end-to-end ablation study (training all 8 module configurations and subsequently evaluating them through the audit pipeline), use the provided bash script:
 
-```text
-RBCCPS_Directory/
-  datasets/
-  documentation/
-  final_paper/
-  scripts/
-  .gitignore
-  README.md
+```bash
+./scripts/run_full_ablation.sh \
+    --experiment original \
+    --video /path/to/test_video.mp4 \
+    --gt-labels /path/to/yolo_labels_dir/ \
+    --cases all
 ```
 
-### `datasets/`
+---
 
-Contains local dataset storage used for research and experimentation, including raw videos, extracted frames, imported datasets, and derived artifacts. The current active derived areas are `datasets/derived/annotation_click_review/` and `datasets/derived/annotation_automation_v3/`. The current organization and retention notes for this directory are documented in [datasets/README.md](datasets/README.md).
+## 🔦 Running the Audit Pipeline
 
-### `documentation/`
+The core evaluation architecture integrates detection, tracking, measurement, and aggregation into a single command. The orchestrator produces a marked-up video alongside comprehensive `.csv`, `.json`, and `.md` reports.
 
-Contains literature-review material, downloaded references, bibliography files, system-design notes, and repository-maintenance notes. The active system-design index lives at [documentation/system_design/README.md](documentation/system_design/README.md).
+### Basic Execution
+```bash
+python3 -m src.evaluation.eval_pres.run_audit \
+    --video /path/to/video.mp4 \
+    --model /path/to/best_weights.pt \
+    --output-dir runs/audit/my_audit_run
+```
 
-### `final_paper/`
+### Advanced Execution with Full Evaluation
+To evaluate detection accuracy (mAP, F1) and status classification alongside the audit, provide ground-truth YOLO labels and a status CSV:
 
-Contains the current paper source and compiled PDF. Treat this as a core project output rather than disposable build clutter.
+```bash
+python3 -m src.evaluation.eval_pres.run_audit \
+    --video /path/to/video.mp4 \
+    --model /path/to/best_weights.pt \
+    --gt-labels /path/to/yolo_labels/ \
+    --gt-status-file /path/to/ground_truth_status.csv \
+    --output-dir runs/audit/full_eval_run
+```
 
-### `scripts/`
+### Using the Location Prior
+If you have telemetry data and want to correlate detections with known GPS locations:
 
-Contains tracked implementation code for local workflows. The active annotation automation workflow is documented under [scripts/annotation_automation/README.md](scripts/annotation_automation/README.md).
+```bash
+python3 -m src.evaluation.eval_pres.run_audit \
+    --video /path/to/video.mp4 \
+    --model /path/to/best_weights.pt \
+    --location-prior runs/audit/known_lamp_prior.json \
+    --location-samples /path/to/telemetry.csv
+```
 
-## Version Control Notes
+---
 
-This directory is initialized as a Git repository. `.gitignore` has been prepared to keep large datasets, regenerated artifacts, and local-only research assets out of version control by default.
+## 📜 Complete List of Commands
 
-## Ignored Folders
+Here is a quick reference guide to the most common tasks:
 
-The following folders are intentionally listed in `.gitignore` because they contain large binary assets, regenerated data, or imported reference material that should usually remain outside version control.
+| Task | Command |
+|------|---------|
+| **Install Package** | `pip install -e ".[train,measurement,dev]"` |
+| **Train Baseline** | `python3 -m src.detection.training.ablation --experiment original --case baseline` |
+| **Train All Modules** | `python3 -m src.detection.training.ablation --experiment original --case all_modules` |
+| **Full Ablation Run** | `./scripts/run_full_ablation.sh --experiment original --video <video.mp4> --gt-labels <labels_dir>` |
+| **Run Basic Audit** | `python3 -m src.evaluation.eval_pres.run_audit --video <video.mp4> --model <best.pt>` |
+| **Audit with Eval** | `python3 -m src.evaluation.eval_pres.run_audit --video <vid> --model <pt> --gt-labels <dir>` |
+| **Audit Dry-Run** | `python3 -m src.evaluation.eval_pres.run_audit --video <vid> --model <pt> --dry-run` |
 
-| Path | Category | Primary Contents | Source / Provenance | Reason for Exclusion |
-| --- | --- | --- | --- | --- |
-| `datasets/raw/` | Raw capture storage | Original night-drive video clips (`.mp4`) | Phone or vehicle-mounted capture sessions | Large binary source inputs; retained locally rather than versioned |
-| `datasets/extracted_frames/` | Derived dataset storage | Frame batches extracted from raw videos (`.jpg`) | Generated during preprocessing | Regenerable from source videos and large in volume |
-| `datasets/imported/` | External dataset storage | Imported datasets and platform exports | Roboflow exports and other third-party collections | Mixed provenance, large size, and potentially separate redistribution constraints |
-| `datasets/derived/` | Generated artifacts | Preview videos, outputs, intermediate artifacts, and annotation automation products | Produced by scripts, experiments, and review workflows | Rebuildable outputs that should not clutter version history |
-| `documentation/literature_review/papers/` | Literature asset storage | Downloaded research papers and PDF references | Manually collected literature sources | Large binary reference assets, not primary project source files |
+---
 
-## Cleanup Status
+## 🏗️ Architecture Map
 
-- The active surface is defined around the v3 review and corpus workflow.
-- Older workflow generations are retained, but they are no longer the default entrypoint.
-- Local runtime clutter such as `.venvs/`, `_tmp_*`, `runs/`, and `_ultralytics_config/` remains local-only state.
-- The current preservation and deletion triage lives in [documentation/repository_maintenance/cleanup_inventory.md](documentation/repository_maintenance/cleanup_inventory.md).
+Following a recent architectural merger, the core systems reside in:
+- `src/detection/models/`: Core YOLO adaptors and attention definitions.
+- `src/detection/training/`: Training and ablation frameworks.
+- `src/detection/pipeline/`: Trackers and multicue filters.
+- `src/evaluation/eval_pres/`: The main orchestrator (`run_audit.py`), measurement engines, metrics, and report generators.
 
-## Status
-
-At its current stage, this repository should be treated as an active research codebase with a defined current workflow, preserved local data/model assets, and explicit cleanup boundaries for legacy or rebuildable material.
+---
+*Developed by the RBCCPS Computer Vision Team.*

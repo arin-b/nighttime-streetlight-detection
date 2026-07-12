@@ -10,8 +10,8 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Any
 
-from audit_pipeline.config import AggregationConfig, MeasurementConfig
-from audit_pipeline.measurement import LampMeasurement
+from evaluation.eval_pres.audit_config import AggregationConfig, MeasurementConfig
+from evaluation.eval_pres.measurement import LampMeasurement
 
 
 @dataclass

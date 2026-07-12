@@ -122,7 +122,7 @@ DEFAULT_MODEL_REGISTRY: dict[str, ModelAssetSpec] = {
         source_repo_url="https://github.com/FoundationVision/ByteTrack",
         paper_url="https://arxiv.org/abs/2110.06864",
         license_name="MIT",
-        description="Exact upstream ByteTrack source bundle for tracking-stage integration.",
+        description="DEPRECATED: Exact upstream ByteTrack source bundle. To be replaced with UCMC.",
         metadata={
             "runtime_status": "algorithm_source_pinned",
             "integration_mode": "consume detector outputs from YOLOv26 instead of ByteTrack detector checkpoints",

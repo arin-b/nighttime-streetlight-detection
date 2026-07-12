@@ -3,14 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from collections import defaultdict
 
-# def precision(tp: int, fp: int) -> float:
-#     denom = tp + fp
-#     return 0.0 if denom == 0 else tp / denom
 
-
-# def recall(tp: int, fn: int) -> float:
-#     denom = tp + fn
-#     return 0.0 if denom == 0 else tp / denom
 
 @dataclass
 class FrameMetrics:
@@ -164,54 +157,17 @@ class MetricsManager:
         return 1.0 - (errors / denom)
 
     def summary(self) -> dict:
-
         return {
-
-            "frames":
-
-                self.total_frames,
-
-            "tp":
-
-                self.total_tp,
-
-            "fp":
-
-                self.total_fp,
-
-            "fn":
-
-                self.total_fn,
-
-            "precision":
-
-                round(self.precision, 4),
-
-            "recall":
-
-                round(self.recall, 4),
-
-            "f1":
-
-                round(self.f1, 4),
-
-            "mota":
-
-                round(self.mota, 4),
-
-            "id_switches":
-
-                self.total_id_switches,
-
-            "false_positives_per_frame":
-
-                round(self.false_positives_per_frame, 4),
-
-            "total_detections":
-
-                self.total_detections,
-
-            "total_accepted":
-
-                self.total_accepted,
+            "frames": self.total_frames,
+            "tp": self.total_tp,
+            "fp": self.total_fp,
+            "fn": self.total_fn,
+            "precision": round(self.precision, 4),
+            "recall": round(self.recall, 4),
+            "f1": round(self.f1, 4),
+            "mota": round(self.mota, 4),
+            "id_switches": self.total_id_switches,
+            "false_positives_per_frame": round(self.false_positives_per_frame, 4),
+            "total_detections": self.total_detections,
+            "total_accepted": self.total_accepted,
         }

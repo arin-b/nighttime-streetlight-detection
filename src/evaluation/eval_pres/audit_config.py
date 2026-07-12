@@ -49,7 +49,7 @@ class DetectorConfig:
 class TrackerConfig:
     """Multi-object tracker settings (PDF §3)."""
 
-    tracker_type: str = "botsort"  # "botsort" or "bytetrack"
+    tracker_type: str = "botsort"  # "botsort" or "ucmc"
     track_high_thresh: float = 0.25
     track_low_thresh: float = 0.1
     new_track_thresh: float = 0.25

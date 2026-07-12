@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from audit_pipeline.aggregator import AggregatedLamp
+from evaluation.eval_pres.aggregator import AggregatedLamp
 
 
 SCHEMA_VERSION = "streetlight_location_prior_v1"
