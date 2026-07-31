@@ -29,10 +29,72 @@ rbccps-measurement = "rbccps_measurement.cli.main:main"
 rbccps-annotator = "rbccps_annotator.cli:main"
 
 [tool.setuptools]
-package-dir = {"" = "src"}
+packages = [
+    "rbccps_measurement",
+    "rbccps_measurement.attribution",
+    "rbccps_measurement.cli",
+    "rbccps_measurement.config",
+    "rbccps_measurement.contracts",
+    "rbccps_measurement.dataset_prep",
+    "rbccps_measurement.decomposition",
+    "rbccps_measurement.evaluation",
+    "rbccps_measurement.features",
+    "rbccps_measurement.fusion",
+    "rbccps_measurement.geometry",
+    "rbccps_measurement.ingest",
+    "rbccps_measurement.normalization",
+    "rbccps_measurement.photometry",
+    "rbccps_measurement.reporting",
+    "rbccps_measurement.route",
+    "rbccps_measurement.segmentation",
+    "rbccps_measurement.status",
+    "rbccps_measurement.training",
+    "rbccps_od",
+    "rbccps_od.config",
+    "rbccps_od.data_management",
+    "rbccps_od.domain",
+    "rbccps_od.evaluation",
+    "rbccps_od.io",
+    "rbccps_od.pipeline",
+    "rbccps_od.review",
+    "rbccps_od.training",
+    "rbccps_annotator",
+    "evaluation",
+    "evaluation.eval_pres",
+]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.setuptools.package-dir]
+rbccps_measurement = "src/measurement"
+"rbccps_measurement.attribution" = "src/measurement/attribution"
+"rbccps_measurement.cli" = "src/measurement/cli"
+"rbccps_measurement.config" = "src/measurement/config"
+"rbccps_measurement.contracts" = "src/measurement/contracts"
+"rbccps_measurement.dataset_prep" = "src/measurement/dataset_prep"
+"rbccps_measurement.decomposition" = "src/measurement/decomposition"
+"rbccps_measurement.evaluation" = "src/measurement/evaluation"
+"rbccps_measurement.features" = "src/measurement/features"
+"rbccps_measurement.fusion" = "src/measurement/fusion"
+"rbccps_measurement.geometry" = "src/measurement/geometry"
+"rbccps_measurement.ingest" = "src/measurement/ingest"
+"rbccps_measurement.normalization" = "src/measurement/normalization"
+"rbccps_measurement.photometry" = "src/measurement/photometry"
+"rbccps_measurement.reporting" = "src/measurement/reporting"
+"rbccps_measurement.route" = "src/measurement/route"
+"rbccps_measurement.segmentation" = "src/measurement/segmentation"
+"rbccps_measurement.status" = "src/measurement/status"
+"rbccps_measurement.training" = "src/measurement/training"
+rbccps_od = "src/detection"
+"rbccps_od.config" = "src/detection/config"
+"rbccps_od.data_management" = "src/detection/data_management"
+"rbccps_od.domain" = "src/detection/domain"
+"rbccps_od.evaluation" = "src/detection/evaluation"
+"rbccps_od.io" = "src/detection/io"
+"rbccps_od.pipeline" = "src/detection/pipeline"
+"rbccps_od.review" = "src/detection/review"
+"rbccps_od.training" = "src/detection/training"
+rbccps_annotator = "src/annotator"
+evaluation = "src/evaluation"
+"evaluation.eval_pres" = "src/evaluation/eval_pres"
 
 [tool.setuptools.package-data]
 rbccps_annotator = ["static/*.html", "static/*.css", "static/*.js"]

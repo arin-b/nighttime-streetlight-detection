@@ -31,6 +31,7 @@ from typing import Any, TypedDict
 import cv2
 import numpy as np
 
+from detection.config.hyperparams import load_detection_hyperparameters
 from evaluation.eval_pres.audit_config import (
     AggregationConfig,
     AuditPipelineConfig,
@@ -83,6 +84,12 @@ def parse_args() -> argparse.Namespace:
     )
 
     # ── Required ─────────────────────────────────────────────────────
+    payload = load_detection_hyperparameters()
+    detector_payload = payload.get("detector", {})
+    multicue_payload = payload.get("multicue", {})
+
+    p.add_argument("--config",
+                   help="Path to a YAML file containing detection hyperparameters.")
     p.add_argument("--video",
                    help="Path to the input video.")
     p.add_argument("--model",
@@ -93,13 +100,13 @@ def parse_args() -> argparse.Namespace:
                    help="Output directory. Default: runs/audit/<video_stem>")
 
     # ── Detector ─────────────────────────────────────────────────────
-    p.add_argument("--conf", type=float, default=0.5,
+    p.add_argument("--conf", type=float, default=float(detector_payload.get("conf_threshold", 0.25)),
                    help="YOLO confidence threshold.")
-    p.add_argument("--iou", type=float, default=0.45,
+    p.add_argument("--iou", type=float, default=float(detector_payload.get("iou_threshold", 0.45)),
                    help="NMS IoU threshold.")
-    p.add_argument("--imgsz", type=int, default=1280,
+    p.add_argument("--imgsz", type=int, default=int(detector_payload.get("imgsz", 1280)),
                    help="Inference image size.")
-    p.add_argument("--device", default="0",
+    p.add_argument("--device", default=str(detector_payload.get("device", "0")),
                    help="Inference device (e.g. '0' for GPU, 'cpu').")
     p.add_argument("--classes", type=int, nargs="+",
                    help="Streetlight class indices to detect. If omitted, class IDs "
@@ -131,16 +138,16 @@ def parse_args() -> argparse.Namespace:
     # ── Multi-cue filters ────────────────────────────────────────────
     p.add_argument("--disable-multicue", action="store_true",
                    help="Disable multi-cue filtering entirely.")
-    p.add_argument("--aggregation-threshold", type=float, default=0.5,
+    p.add_argument("--aggregation-threshold", type=float, default=float(multicue_payload.get("aggregation_threshold", 0.5)),
                    help="Weighted multi-cue acceptance threshold.")
-    p.add_argument("--aspect-ratio-min", type=float, default=0.3)
-    p.add_argument("--aspect-ratio-max", type=float, default=3.0)
-    p.add_argument("--spatial-upper-fraction", type=float, default=0.85)
-    p.add_argument("--min-brightness-det", type=int, default=30,
+    p.add_argument("--aspect-ratio-min", type=float, default=float(multicue_payload.get("aspect_ratio_min", 0.3)))
+    p.add_argument("--aspect-ratio-max", type=float, default=float(multicue_payload.get("aspect_ratio_max", 3.0)))
+    p.add_argument("--spatial-upper-fraction", type=float, default=float(multicue_payload.get("spatial_upper_fraction", 0.95)))
+    p.add_argument("--min-brightness-det", type=int, default=int(multicue_payload.get("min_brightness_for_detection", 10)),
                    help="Min max-pixel brightness in ROI to keep a detection.")
-    p.add_argument("--min-track-confirm-frames", type=int, default=3,
+    p.add_argument("--min-track-confirm-frames", type=int, default=int(multicue_payload.get("min_track_frames_for_confirmation", 1)),
                    help="Min frames for a track to be temporally confirmed.")
-    p.add_argument("--duplicate-distance-px", type=float, default=50.0,
+    p.add_argument("--duplicate-distance-px", type=float, default=float(multicue_payload.get("duplicate_center_distance_px", 80.0)),
                    help="Max pixel distance to merge duplicate tracks.")
 
     # ── Measurement ──────────────────────────────────────────────────
@@ -213,21 +220,24 @@ def parse_args() -> argparse.Namespace:
 # ================================================================== #
 
 def build_config(args: argparse.Namespace) -> AuditPipelineConfig:
-    """Build the full pipeline config from CLI args."""
+    """Build the full pipeline config from CLI args and YAML hyperparameters."""
+    payload = load_detection_hyperparameters(args.config)
+    detector_payload = payload.get("detector", {})
+    multicue_payload = payload.get("multicue", {})
     return AuditPipelineConfig(
         video_path=str(Path(args.video).resolve()) if args.video else "",
         output_dir=args.output_dir,
         detector=DetectorConfig(
-            model_path=str(Path(args.model).resolve()) if args.model else "",
+            model_path=str(Path(args.model).resolve()) if args.model else str(detector_payload.get("model_path", "")),
             conf_threshold=args.conf,
             iou_threshold=args.iou,
             imgsz=args.imgsz,
             device=args.device,
             target_classes=args.classes,
             target_labels=args.target_labels,
-            use_geometry_attention=args.use_geometry_attention,
-            use_cse=args.use_cse,
-            use_negative_attention=args.use_negative_attention,
+            use_geometry_attention=args.use_geometry_attention or bool(detector_payload.get("use_geometry_attention", False)),
+            use_cse=args.use_cse or bool(detector_payload.get("use_cse", False)),
+            use_negative_attention=args.use_negative_attention or bool(detector_payload.get("use_negative_attention", False)),
         ),
         tracker=TrackerConfig(
             tracker_type=args.tracker,
@@ -237,7 +247,7 @@ def build_config(args: argparse.Namespace) -> AuditPipelineConfig:
             with_reid=args.with_reid,
         ),
         multicue=MultiCueConfig(
-            enabled=not args.disable_multicue,
+            enabled=not args.disable_multicue and bool(multicue_payload.get("enabled", True)),
             aggregation_threshold=args.aggregation_threshold,
             aspect_ratio_min=args.aspect_ratio_min,
             aspect_ratio_max=args.aspect_ratio_max,

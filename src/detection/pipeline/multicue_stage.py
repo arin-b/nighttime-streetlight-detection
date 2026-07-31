@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+from detection.config.hyperparams import load_detection_hyperparameters
 from rbccps_od.config.schemas import CueWeights
 from rbccps_od.domain.cues import CueScore
 from rbccps_od.domain.tracks import Track
@@ -52,10 +55,26 @@ def position_prior_cue(track: Track, frame_height: float | None = None) -> CueSc
 
 
 class MultiCueFilterStage:
-    def __init__(self, weights: CueWeights, threshold: float = 0.5, enabled: bool = False) -> None:
+    def __init__(
+        self,
+        weights: CueWeights | None = None,
+        threshold: float | None = None,
+        enabled: bool | None = None,
+        config_path: str | Path | None = None,
+    ) -> None:
+        payload = load_detection_hyperparameters(config_path)
+        multicue_payload = payload.get("multicue", {})
+        cue_weights_payload = multicue_payload.get("cue_weights", {})
+        if weights is None:
+            weights = CueWeights(
+                trajectory=float(cue_weights_payload.get("trajectory", 0.25)),
+                size_progression=float(cue_weights_payload.get("size_progression", 0.25)),
+                light_characteristics=float(cue_weights_payload.get("light_characteristics", 0.25)),
+                position_prior=float(cue_weights_payload.get("position_prior", 0.25)),
+            )
         self.weights = weights
-        self.threshold = threshold
-        self.enabled = enabled
+        self.threshold = float(multicue_payload.get("aggregation_threshold", 0.5) if threshold is None else threshold)
+        self.enabled = bool(multicue_payload.get("enabled", True) if enabled is None else enabled)
 
     def score_track(self, track: Track, frame_height: float | None = None) -> tuple[float, list[CueScore]]:
         cues = [

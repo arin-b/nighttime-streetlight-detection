@@ -20,7 +20,7 @@ from .video_utils import extract_frames, write_contact_sheet, write_mp4, write_r
 
 
 DEFAULT_VIDEO = Path("eval_pres/sample_videos/busy_street_20260220_200501_629_1min.mp4")
-DEFAULT_MODEL = Path("models/measurement/pretrained/streetlight_detector_v3/hpc_pull/best.pt")
+DEFAULT_MODEL = Path("/media/arindamb/NewVolume/Street_Light_Detection/models/measurement/pretrained/streetlight_detector_v3/hpc_pull/best.pt")
 
 
 @dataclass(frozen=True)
@@ -71,12 +71,54 @@ def run_video_demo(
     resolved_model = Path(model_path) if model_path else root / DEFAULT_MODEL
     if not resolved_model.is_absolute():
         resolved_model = root / resolved_model
+    # ── Per-frame timing: detection + tracking + filtering (pre-measurement) ──
+    t_pre_start = time.perf_counter()
     if skip_detector:
         detections_by_frame: list[list[FrameDetection]] = [[] for _ in frame_paths]
+        per_frame_det_times: list[float] = [0.0] * len(frame_paths)
     else:
-        detections_by_frame = run_detector(frame_paths, resolved_model, conf=conf, max_det=max_det)
+        detections_by_frame, per_frame_det_times = run_detector(frame_paths, resolved_model, conf=conf, max_det=max_det)
+    t_det_done = time.perf_counter()
     linked_tracks_all = link_detections(detections_by_frame, iou_threshold=iou_link_threshold)
+    t_track_done = time.perf_counter()
     linked_tracks = select_measurement_tracks(linked_tracks_all, measurement_max_tracks)
+    t_filter_done = time.perf_counter()
+    t_pre_total = t_filter_done - t_pre_start
+
+    n_frames = len(frame_paths)
+    detection_total_s = t_det_done - t_pre_start
+    tracking_total_s = t_track_done - t_det_done
+    filtering_total_s = t_filter_done - t_track_done
+    per_frame_avg_det_s = detection_total_s / n_frames if n_frames else 0.0
+    per_frame_avg_track_s = tracking_total_s / n_frames if n_frames else 0.0
+    per_frame_avg_filter_s = filtering_total_s / n_frames if n_frames else 0.0
+    per_frame_avg_total_s = t_pre_total / n_frames if n_frames else 0.0
+
+    pre_measurement_timing = {
+        "num_frames": n_frames,
+        "detection_total_s": round(detection_total_s, 4),
+        "tracking_total_s": round(tracking_total_s, 4),
+        "filtering_total_s": round(filtering_total_s, 4),
+        "pre_measurement_total_s": round(t_pre_total, 4),
+        "per_frame_avg_detection_ms": round(per_frame_avg_det_s * 1000, 2),
+        "per_frame_avg_tracking_ms": round(per_frame_avg_track_s * 1000, 2),
+        "per_frame_avg_filtering_ms": round(per_frame_avg_filter_s * 1000, 2),
+        "per_frame_avg_total_ms": round(per_frame_avg_total_s * 1000, 2),
+        "per_frame_detection_ms": [round(t * 1000, 2) for t in per_frame_det_times],
+    }
+
+    print("\n" + "=" * 70)
+    print("  PRE-MEASUREMENT INFERENCE TIMING  (detection + tracking + filtering)")
+    print("=" * 70)
+    print(f"  Frames processed        : {n_frames}")
+    print(f"  Detection   (total)     : {detection_total_s:8.3f} s   | per-frame avg: {per_frame_avg_det_s*1000:8.2f} ms")
+    print(f"  Tracking    (total)     : {tracking_total_s:8.3f} s   | per-frame avg: {per_frame_avg_track_s*1000:8.2f} ms")
+    print(f"  Filtering   (total)     : {filtering_total_s:8.3f} s   | per-frame avg: {per_frame_avg_filter_s*1000:8.2f} ms")
+    print(f"  ─────────────────────────────────────────────────────────────────")
+    print(f"  TOTAL pre-measurement   : {t_pre_total:8.3f} s   | per-frame avg: {per_frame_avg_total_s*1000:8.2f} ms")
+    print(f"  Effective FPS           : {(1.0 / per_frame_avg_total_s) if per_frame_avg_total_s > 0 else float('inf'):8.2f} frames/sec")
+    print("=" * 70 + "\n")
+
     manifest = build_clip_manifest(frame_paths, linked_tracks, fps_sample=fps_sample, clip_id=video_path.stem)
     manifest_path = out_path / "clip_manifest.json"
     write_json(manifest_path, manifest)
@@ -137,6 +179,7 @@ def run_video_demo(
         "measurement_track_cap": measurement_max_tracks,
         "measurement_reports": len(report_dicts),
         "elapsed_seconds": round(elapsed, 3),
+        "pre_measurement_timing": pre_measurement_timing,
         "artifacts": {
             "clip_manifest": str(manifest_path),
             "detections_csv": str(out_path / "detections.csv"),
@@ -179,14 +222,16 @@ def run_video_demo(
     return summary
 
 
-def run_detector(frame_paths: list[Path], model_path: Path, conf: float, max_det: int) -> list[list[FrameDetection]]:
+def run_detector(frame_paths: list[Path], model_path: Path, conf: float, max_det: int) -> tuple[list[list[FrameDetection]], list[float]]:
     try:
         from ultralytics import YOLO
     except ImportError as exc:
         raise RuntimeError("ultralytics is required to run detector-backed eval_pres video demos") from exc
     model = YOLO(str(model_path))
     detections_by_frame: list[list[FrameDetection]] = []
+    per_frame_times: list[float] = []
     for index, frame_path in enumerate(frame_paths, start=1):
+        t_frame_start = time.perf_counter()
         image = Image.open(frame_path).convert("RGB")
         width, height = image.size
         result = model.predict(str(frame_path), conf=conf, iou=0.55, max_det=max_det, verbose=False)[0]
@@ -208,7 +253,8 @@ def run_detector(frame_paths: list[Path], model_path: Path, conf: float, max_det
                     )
                 )
         detections_by_frame.append(detections)
-    return detections_by_frame
+        per_frame_times.append(time.perf_counter() - t_frame_start)
+    return detections_by_frame, per_frame_times
 
 
 def link_detections(detections_by_frame: list[list[FrameDetection]], iou_threshold: float = 0.30, max_frame_gap: int = 3) -> list[LinkedTrack]:
@@ -289,7 +335,7 @@ def build_clip_manifest(frame_paths: list[Path], linked_tracks: list[LinkedTrack
                     "frame_id": detection.frame_index,
                     "timestamp_ns": timestamp0 + (detection.frame_index - 1) * step_ns,
                     "track_id": track.track_id,
-                    "class_name": "streetlight_lamp_head",
+                    "class_name": "streetlight",
                     "bbox_xyxy": list(detection.bbox_xyxy),
                     "bbox_format": "pixel_xyxy_original_frame",
                     "detector_score": detection.score,
