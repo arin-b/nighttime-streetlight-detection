@@ -119,6 +119,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--overwrite-original-view", action="store_true")
 
     parser.add_argument("--video", help="Held-out video used for detector/filtering evaluation and deployment benchmark.")
+    parser.add_argument("--pipeline-video", help="Held-out video used for tracking/filtering/deployment evaluation. Overrides --video.")
+    parser.add_argument(
+        "--detector-eval-data",
+        help=(
+            "Dataset YAML for detector-only held-out evaluation. Defaults to the selected data variant's "
+            "dataset.yaml when it can be resolved."
+        ),
+    )
+    parser.add_argument("--detector-eval-split", choices=("val", "test"), default="test")
     parser.add_argument("--gt-labels", help="YOLO label directory for held-out evaluation.")
     parser.add_argument("--gt-status-file", help="Optional status-classification ground truth CSV.")
     parser.add_argument("--conf", type=float, default=0.25)
@@ -126,7 +135,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--vid-stride", type=int, default=1)
     parser.add_argument("--no-save-video", action="store_true")
 
-    parser.add_argument("--calibration-data", help="Representative dataset YAML for deployment exports that need calibration.")
+    parser.add_argument(
+        "--calibration-dataset-yaml",
+        help=(
+            "Dataset YAML/config used to construct the representative calibration set for export formats "
+            "that require calibration. The default FP32/FP16/NCNN formats do not require it."
+        ),
+    )
+    parser.add_argument(
+        "--calibration-data",
+        dest="calibration_dataset_yaml",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--deployment-formats", nargs="*", default=list(DEPLOYMENT_FORMATS), choices=DEPLOYMENT_FORMATS)
     parser.add_argument("--deployment-mode", choices=("shortlist", "all"), default="shortlist")
     parser.add_argument("--shortlist-size", type=int, default=8)
@@ -157,6 +177,7 @@ def suite_paths(args: argparse.Namespace) -> dict[str, Path]:
         "manifests": root / "manifests",
         "logs": root / "logs",
         "pipeline": root / "pipeline",
+        "detector_eval": root / "detector_eval",
         "exports": root / "deployment" / "exports",
         "benchmarks": root / "deployment" / "benchmarks",
         "aggregated": root / "aggregated",
@@ -172,6 +193,7 @@ def planned_records(args: argparse.Namespace) -> list[StageRecord]:
     if args.stage in {"all", "detection"}:
         for detector in detectors:
             records.append(_detector_record(args, detector))
+            records.append(_detector_eval_record(args, detector))
     if args.stage in {"all", "filtering"}:
         for pipeline in pipelines:
             records.append(_pipeline_record(args, pipeline))
@@ -213,6 +235,9 @@ def write_run_manifest(args: argparse.Namespace, records: list[StageRecord], sta
             "iou": args.iou,
             "tracker": "botsort",
             "vid_stride": args.vid_stride,
+            "detector_eval_data": str(_detector_eval_data(args)) if _detector_eval_data(args) else None,
+            "detector_eval_split": args.detector_eval_split,
+            "pipeline_video": str(_pipeline_video(args)) if _pipeline_video(args) else None,
         },
         "detectors": [asdict(detector) for detector in DETECTOR_GRID],
         "pipeline_experiments": [asdict(item) for item in pipeline_grid()],
@@ -241,7 +266,7 @@ def run_suite(args: argparse.Namespace) -> int:
     status_by_key = _load_existing_statuses(suite_paths(args)["manifests"])
     executed: list[StageRecord] = []
 
-    first_pass = [record for record in records if record.stage in {"detection", "filtering"}]
+    first_pass = [record for record in records if record.stage in {"detection", "detector_eval", "filtering"}]
     if args.stage == "deployment":
         first_pass = []
     if args.stage == "report":
@@ -319,19 +344,26 @@ def dry_run_diagnostics(args: argparse.Namespace, records: list[StageRecord]) ->
     warnings: list[str] = []
     if args.video and not _resolve(args.video).exists():
         missing.append(f"video: {args.video}")
+    if args.pipeline_video and not _resolve(args.pipeline_video).exists():
+        missing.append(f"pipeline_video: {args.pipeline_video}")
+    eval_data = _detector_eval_data(args)
+    if eval_data is not None and not eval_data.exists():
+        missing.append(f"detector_eval_data: {eval_data}")
     if args.gt_labels and not _resolve(args.gt_labels).exists():
         missing.append(f"gt_labels: {args.gt_labels}")
-    if args.calibration_data and not _resolve(args.calibration_data).exists():
-        missing.append(f"calibration_data: {args.calibration_data}")
+    calibration_dataset = _calibration_dataset_yaml(args)
+    if calibration_dataset and not calibration_dataset.exists():
+        missing.append(f"calibration_dataset_yaml: {calibration_dataset}")
     if any(det.use_negative_attention for det in DETECTOR_GRID) and not args.negative_mask_root and not args.allow_dataset_negative_masks:
         warnings.append("Negative-attention training requires --negative-mask-root or --allow-dataset-negative-masks.")
-    if args.stage in {"all", "filtering", "deployment"} and not args.video:
-        warnings.append("Filtering/deployment evaluation requires --video; stages will fail if executed without it.")
+    if args.stage in {"all", "filtering", "deployment"} and not _pipeline_video(args):
+        warnings.append("Filtering/deployment evaluation requires --pipeline-video or legacy --video.")
     if args.max_parallel != 1:
         warnings.append("--max-parallel is recorded but execution remains sequential to respect GPU safety.")
 
     return {
         "expected_detector_runs": len(DETECTOR_GRID),
+        "expected_detector_eval_runs": sum(1 for record in records if record.stage == "detector_eval"),
         "expected_pipeline_runs": len(pipeline_grid()),
         "expected_deployment_runs": sum(1 for record in records if record.stage == "deployment"),
         "expected_total_records": len(records),
@@ -625,12 +657,13 @@ def _detector_record(args: argparse.Namespace, detector: DetectorExperiment) -> 
 def _pipeline_record(args: argparse.Namespace, item: PipelineExperiment) -> StageRecord:
     detector = detector_by_id(item.detector_id)
     out = suite_paths(args)["pipeline"] / item.experiment_id
+    video = _pipeline_video(args)
     cmd = [
         sys.executable,
         "-m",
         "evaluation.eval_pres.run_audit",
         "--video",
-        args.video or "",
+        str(video) if video else "",
         "--model",
         str(_detector_artifact_dir(args, detector) / "best.pt"),
         "--output-dir",
@@ -665,11 +698,41 @@ def _pipeline_record(args: argparse.Namespace, item: PipelineExperiment) -> Stag
     return StageRecord(item.experiment_id, "filtering", command=cmd, artifact_dir=str(out))
 
 
+def _detector_eval_record(args: argparse.Namespace, detector: DetectorExperiment) -> StageRecord:
+    out = _detector_eval_dir(args, detector)
+    data = _detector_eval_data(args)
+    cmd = [
+        sys.executable,
+        "-m",
+        "rbccps_od.training.validate",
+        "--model",
+        str(_detector_artifact_dir(args, detector) / "best.pt"),
+        "--data",
+        str(data) if data else "",
+        "--imgsz",
+        str(args.imgsz),
+        "--batch",
+        str(args.batch),
+        "--device",
+        str(args.device),
+        "--split",
+        args.detector_eval_split,
+        "--conf",
+        str(args.conf),
+        "--iou",
+        str(args.iou),
+        "--output-json",
+        str(out / "metrics.json"),
+    ]
+    return StageRecord(detector.experiment_id, "detector_eval", command=cmd, artifact_dir=str(out))
+
+
 def _deployment_record(args: argparse.Namespace, detector: DetectorExperiment, filtering_enabled: bool, fmt: str) -> StageRecord:
     suffix = "FILTER" if filtering_enabled else "NOFILTER"
     deployment_id = f"{detector.experiment_id}_{suffix}_{fmt.upper()}"
     export_dir = suite_paths(args)["exports"] / deployment_id
     bench_dir = suite_paths(args)["benchmarks"] / deployment_id
+    video = _pipeline_video(args)
     cmd = [
         sys.executable,
         "scripts/export_quantized_models.py",
@@ -682,8 +745,9 @@ def _deployment_record(args: argparse.Namespace, detector: DetectorExperiment, f
         "--formats",
         fmt,
     ]
-    if args.calibration_data:
-        cmd.extend(["--data", args.calibration_data])
+    calibration_dataset = _calibration_dataset_yaml(args)
+    if calibration_dataset:
+        cmd.extend(["--data", str(calibration_dataset)])
     cmd.extend(
         [
             "&&",
@@ -694,7 +758,7 @@ def _deployment_record(args: argparse.Namespace, detector: DetectorExperiment, f
             "--baseline",
             str(_detector_artifact_dir(args, detector) / "best.pt"),
             "--video",
-            args.video or "",
+            str(video) if video else "",
             "--out",
             str(bench_dir),
             "--preset",
@@ -725,6 +789,8 @@ def _metrics_for_record(args: argparse.Namespace, record: StageRecord) -> dict[s
         return _extract_audit_metrics(Path(record.artifact_dir))
     if record.stage == "detection":
         return _extract_training_metrics(Path(record.artifact_dir))
+    if record.stage == "detector_eval":
+        return _extract_detector_eval_metrics(Path(record.artifact_dir))
     if record.stage == "deployment":
         return _extract_deployment_metrics(Path(record.artifact_dir))
     return {}
@@ -734,6 +800,7 @@ def _detector_summary_row(args: argparse.Namespace, detector: DetectorExperiment
     no_filter_id = next(item.experiment_id for item in pipeline_grid() if item.detector_id == detector.experiment_id and not item.filtering_enabled)
     pipeline = next((row for row in pipeline_rows if row["experiment_id"] == no_filter_id), {})
     training = _extract_training_metrics(_detector_artifact_dir(args, detector))
+    evaluation = _extract_detector_eval_metrics(_detector_eval_dir(args, detector))
     return {
         "experiment_id": detector.experiment_id,
         "case": detector.case,
@@ -741,13 +808,19 @@ def _detector_summary_row(args: argparse.Namespace, detector: DetectorExperiment
         "use_negative_attention": detector.use_negative_attention,
         "use_geometry_attention": detector.use_geometry_attention,
         "checkpoint": str(_detector_artifact_dir(args, detector) / "best.pt"),
-        "status": "success" if (_detector_artifact_dir(args, detector) / "best.pt").exists() else "missing_checkpoint",
-        "map50": pipeline.get("map50") or training.get("map50"),
-        "map50_95": pipeline.get("map50_95") or training.get("map50_95"),
-        "precision": pipeline.get("precision") or training.get("precision"),
-        "recall": pipeline.get("recall") or training.get("recall"),
-        "f1": pipeline.get("f1") or training.get("f1"),
-        "false_positives_per_frame": pipeline.get("false_positives_per_frame"),
+        "status": "success" if evaluation else ("trained" if (_detector_artifact_dir(args, detector) / "best.pt").exists() else "missing_checkpoint"),
+        "map50": evaluation.get("map50") or training.get("map50"),
+        "map50_95": evaluation.get("map50_95") or training.get("map50_95"),
+        "precision": evaluation.get("precision") or training.get("precision"),
+        "recall": evaluation.get("recall") or training.get("recall"),
+        "f1": evaluation.get("f1") or training.get("f1"),
+        "false_positives_per_frame": None,
+        "pipeline_map50": pipeline.get("map50"),
+        "pipeline_map50_95": pipeline.get("map50_95"),
+        "pipeline_precision": pipeline.get("precision"),
+        "pipeline_recall": pipeline.get("recall"),
+        "pipeline_f1": pipeline.get("f1"),
+        "pipeline_false_positives_per_frame": pipeline.get("false_positives_per_frame"),
         "fps": pipeline.get("fps"),
         "model_size_mb": _file_size_mb(_detector_artifact_dir(args, detector) / "best.pt"),
     }
@@ -825,6 +898,21 @@ def _extract_training_metrics(artifact_dir: Path) -> dict[str, Any]:
     }
 
 
+def _extract_detector_eval_metrics(artifact_dir: Path) -> dict[str, Any]:
+    metrics_path = artifact_dir / "metrics.json"
+    if not metrics_path.exists():
+        return {}
+    payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+    metrics = payload.get("metrics", {}) or {}
+    return {
+        "precision": metrics.get("precision"),
+        "recall": metrics.get("recall"),
+        "f1": metrics.get("f1"),
+        "map50": metrics.get("map50"),
+        "map50_95": metrics.get("map50_95"),
+    }
+
+
 def _extract_deployment_metrics(out: Path) -> dict[str, Any]:
     report = out / "benchmark_report.json"
     if not report.exists():
@@ -851,6 +939,34 @@ def _detector_artifact_dir(args: argparse.Namespace, detector: DetectorExperimen
     experiment = EXPERIMENT_BY_NAME[args.data_variant]
     case = CASE_BY_NAME[detector.case]
     return _resolve(args.artifact_root) / _artifact_name_for(experiment, case)
+
+
+def _detector_eval_dir(args: argparse.Namespace, detector: DetectorExperiment) -> Path:
+    return suite_paths(args)["detector_eval"] / detector.experiment_id
+
+
+def _detector_eval_data(args: argparse.Namespace) -> Path | None:
+    if args.detector_eval_data:
+        return _resolve(args.detector_eval_data)
+    experiment = EXPERIMENT_BY_NAME[args.data_variant]
+    if experiment.dataset_yaml:
+        return _resolve(experiment.dataset_yaml)
+    if experiment.uses_original_view:
+        return _resolve(args.original_dataset_root) / "dataset.yaml"
+    return None
+
+
+def _pipeline_video(args: argparse.Namespace) -> Path | None:
+    if args.pipeline_video:
+        return _resolve(args.pipeline_video)
+    if args.video:
+        return _resolve(args.video)
+    return None
+
+
+def _calibration_dataset_yaml(args: argparse.Namespace) -> Path | None:
+    value = getattr(args, "calibration_dataset_yaml", None)
+    return _resolve(value) if value else None
 
 
 def detector_by_id(experiment_id: str) -> DetectorExperiment:

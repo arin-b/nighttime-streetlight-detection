@@ -48,9 +48,10 @@ def test_planned_dry_run_graph_counts(tmp_path: Path):
     diagnostics = dry_run_diagnostics(args, records)
 
     assert diagnostics["expected_detector_runs"] == 8
+    assert diagnostics["expected_detector_eval_runs"] == 8
     assert diagnostics["expected_pipeline_runs"] == 16
     assert diagnostics["expected_deployment_runs"] == 80
-    assert diagnostics["expected_total_records"] == 105
+    assert diagnostics["expected_total_records"] == 113
     assert set(DEPLOYMENT_FORMATS).issuperset(args.deployment_formats)
 
 
@@ -64,6 +65,63 @@ def test_run_suite_dry_run_writes_manifest_first(tmp_path: Path):
     assert manifest.exists()
     assert diagnostics.exists()
     assert "D1" in manifest.read_text(encoding="utf-8")
+    assert "detector_eval" in manifest.read_text(encoding="utf-8")
+
+
+def test_cli_separates_detector_eval_data_from_pipeline_video(tmp_path: Path):
+    data = tmp_path / "dataset.yaml"
+    video = tmp_path / "clip.mp4"
+    data.write_text("path: .\ntrain: images/train\nval: images/valid\ntest: images/test\n", encoding="utf-8")
+    video.write_bytes(b"video")
+
+    args = parse_args(
+        [
+            "--dry-run",
+            "--output-root",
+            str(tmp_path / "runs"),
+            "--detector-eval-data",
+            str(data),
+            "--pipeline-video",
+            str(video),
+        ]
+    )
+    records = planned_records(args)
+    detector_eval = next(record for record in records if record.stage == "detector_eval")
+    filtering = next(record for record in records if record.stage == "filtering")
+
+    assert str(data) in detector_eval.command
+    assert str(video) in filtering.command
+
+
+def test_calibration_dataset_yaml_is_passed_to_export_data(tmp_path: Path):
+    data = tmp_path / "calibration_dataset.yaml"
+    data.write_text("path: .\ntrain: images/train\nval: images/valid\n", encoding="utf-8")
+    args = parse_args(
+        [
+            "--stage",
+            "deployment",
+            "--output-root",
+            str(tmp_path / "runs"),
+            "--calibration-dataset-yaml",
+            str(data),
+            "--shortlist-size",
+            "1",
+        ]
+    )
+
+    record = planned_records(args)[0]
+
+    assert "--data" in record.command
+    assert str(data) in record.command
+
+
+def test_legacy_calibration_data_alias_still_maps_to_dataset_yaml(tmp_path: Path):
+    data = tmp_path / "calibration_dataset.yaml"
+    data.write_text("path: .\ntrain: images/train\nval: images/valid\n", encoding="utf-8")
+
+    args = parse_args(["--calibration-data", str(data)])
+
+    assert args.calibration_dataset_yaml == str(data)
 
 
 def test_factorial_effects_computes_main_effects():
