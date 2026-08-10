@@ -46,6 +46,7 @@ class StageRecord:
     returncode: int | None = None
     error_message: str = ""
     metrics: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 DETECTOR_GRID: tuple[DetectorExperiment, ...] = (
@@ -262,6 +263,13 @@ def run_suite(args: argparse.Namespace) -> int:
         )
         print(json.dumps({"manifest": str(manifest), **diagnostics}, indent=2))
         return 0
+
+    preflight_errors = _preflight_errors(args)
+    if preflight_errors:
+        error_path = suite_paths(args)["manifests"] / "preflight_errors.json"
+        error_path.write_text(json.dumps({"errors": preflight_errors}, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps({"status": "preflight_failed", "errors": preflight_errors, "error_report": str(error_path)}, indent=2))
+        return 2
 
     status_by_key = _load_existing_statuses(suite_paths(args)["manifests"])
     executed: list[StageRecord] = []
@@ -542,9 +550,20 @@ def _execute_record(args: argparse.Namespace, record: StageRecord) -> StageRecor
             record.completion_time = _now()
             record.duration_s = round(time.perf_counter() - start, 3)
             return record
+        if record.stage == "deployment":
+            completed = _execute_deployment_record(args, record, log_path)
+            record.status = completed.status
+            record.returncode = completed.returncode
+            record.error_message = completed.error_message
+            record.metadata.update(completed.metadata)
+            record.completion_time = _now()
+            record.duration_s = round(time.perf_counter() - start, 3)
+            record.metrics = _metrics_for_record(args, record)
+            return record
         env = _subprocess_env()
         with log_path.open("w", encoding="utf-8") as log:
-            returncode = _run_command_sequence(record.command, env, log)
+            completed = subprocess.run(record.command, cwd=repo_root(), env=env, stdout=log, stderr=subprocess.STDOUT, check=False)
+            returncode = int(completed.returncode)
         record.returncode = returncode
         record.status = "success" if returncode == 0 else "failed"
         if returncode != 0:
@@ -558,20 +577,34 @@ def _execute_record(args: argparse.Namespace, record: StageRecord) -> StageRecor
     return record
 
 
-def _run_command_sequence(command: list[str], env: dict[str, str], log: Any) -> int:
-    parts: list[list[str]] = [[]]
-    for token in command:
-        if token == "&&":
-            parts.append([])
-        else:
-            parts[-1].append(token)
-    for part in parts:
-        if not part:
-            continue
-        completed = subprocess.run(part, cwd=repo_root(), env=env, stdout=log, stderr=subprocess.STDOUT, check=False)
-        if completed.returncode != 0:
-            return int(completed.returncode)
-    return 0
+def _execute_deployment_record(args: argparse.Namespace, record: StageRecord, log_path: Path) -> StageRecord:
+    env = _subprocess_env()
+    export_dir = Path(record.metadata["export_dir"])
+    fmt = str(record.metadata["format"])
+    with log_path.open("w", encoding="utf-8") as log:
+        log.write("== export ==\n")
+        export_result = subprocess.run(record.command, cwd=repo_root(), env=env, stdout=log, stderr=subprocess.STDOUT, check=False)
+        if export_result.returncode != 0:
+            record.status = "failed"
+            record.returncode = int(export_result.returncode)
+            record.error_message = f"Export failed with return code {export_result.returncode}; see {log_path}"
+            return record
+        exported_model = _exported_model_from_report(export_dir, fmt)
+        if exported_model is None or not exported_model.exists():
+            record.status = "failed"
+            record.returncode = 1
+            record.error_message = f"Export report did not contain a usable model for {fmt}; see {export_dir / 'export_report.json'}"
+            return record
+        benchmark_command = _deployment_audit_command(args, record, exported_model)
+        record.metadata["exported_model"] = str(exported_model)
+        record.metadata["benchmark_command"] = benchmark_command
+        log.write("\n== audit benchmark ==\n")
+        benchmark_result = subprocess.run(benchmark_command, cwd=repo_root(), env=env, stdout=log, stderr=subprocess.STDOUT, check=False)
+        record.returncode = int(benchmark_result.returncode)
+        record.status = "success" if benchmark_result.returncode == 0 else "failed"
+        if benchmark_result.returncode != 0:
+            record.error_message = f"Deployment audit failed with return code {benchmark_result.returncode}; see {log_path}"
+        return record
 
 
 def _write_stage_manifest(args: argparse.Namespace, record: StageRecord) -> Path:
