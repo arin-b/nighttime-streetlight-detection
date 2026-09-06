@@ -7,6 +7,7 @@ from typing import Any
 
 from rbccps_od.config.paths import ensure_dir, repo_root
 from rbccps_od.config.schemas import CueWeights
+from rbccps_od.domain.tracks import Track
 from rbccps_od.io.csv_io import write_csv
 from rbccps_od.io.json_io import write_json
 from rbccps_od.models.yolo26 import YOLO26Detector
@@ -18,6 +19,8 @@ from rbccps_od.pipeline.advanced_runner import (
 )
 from rbccps_od.pipeline.multicue_stage import MultiCueFilterStage
 from rbccps_od.evaluation.metrics import MetricsManager
+from tracker import TRACKING_MODES, CustomStreetlightTracker, TrackerConfig
+from tracker.visualization import draw_tracks
 
 
 GMC_METHODS = {"sparseOptFlow", "orb", "sift", "ecc", "none"}
@@ -25,7 +28,7 @@ GMC_METHODS = {"sparseOptFlow", "orb", "sift", "ecc", "none"}
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run YOLO26m video inference with BoT-SORT tracking and multi-cue filtering."
+        description="Run YOLO26m video inference with BoT-SORT or custom streetlight tracking."
     )
     parser.add_argument("--video", required=True, help="Input video path.")
     parser.add_argument(
@@ -41,6 +44,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vid-stride", type=int, default=1, help="Process every Nth video frame.")
     parser.add_argument("--aggregation-threshold", type=float, default=0.5, help="Multi-cue acceptance threshold.")
     parser.add_argument("--disable-multicue", action="store_true", help="Keep tracks without multi-cue filtering.")
+    parser.add_argument("--tracker", choices=("botsort", "custom"), default="botsort", help="Tracker implementation to evaluate.")
+    parser.add_argument("--tracking-mode", choices=TRACKING_MODES, default="centre", help="Controlled custom-tracker ablation mode.")
     parser.add_argument("--tracker-config", help="Optional custom Ultralytics tracker YAML.")
     parser.add_argument(
         "--gmc-method",
@@ -54,6 +59,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--track-buffer", type=int, default=30)
     parser.add_argument("--match-thresh", type=float, default=0.8)
     parser.add_argument("--with-reid", action="store_true", help="Enable BoT-SORT ReID if the environment supports it.")
+    parser.add_argument("--max-age", type=int, default=5, help="Custom tracker: missed frames retained before deletion.")
+    parser.add_argument("--min-hits", type=int, default=3, help="Custom tracker: hits required for confirmed status.")
+    parser.add_argument("--max-center-distance", type=float, default=100.0, help="Custom tracker centre-distance gate in pixels.")
+    parser.add_argument("--max-scale-distance", type=float, default=1.0, help="Custom tracker logarithmic-scale gate.")
+    parser.add_argument("--center-weight", type=float, default=1.0, help="Custom tracker centre cost weight.")
+    parser.add_argument("--scale-weight", type=float, default=0.25, help="Custom tracker scale cost weight.")
+    parser.add_argument("--kalman-process-noise", type=float, default=1.0)
+    parser.add_argument("--kalman-measurement-noise", type=float, default=10.0)
+    parser.add_argument("--tracking-debug", action="store_true", help="Write custom association diagnostics and annotate predicted centres.")
     parser.add_argument("--no-save-video", action="store_true", help="Skip annotated video export.")
     parser.add_argument("--dry-run", action="store_true", help="Print the resolved configuration without inference.")
     parser.add_argument("--enable-metrics", action="store_true", help="Enable metrics evaluation using ground-truth labels.")   
@@ -205,6 +219,80 @@ def _box_rows(
     return rows
 
 
+def _custom_tracks_to_domain(observations: list[Any], histories: dict[str, list[list[float]]]) -> list[Track]:
+    """Adapt custom observations to the unchanged downstream Track contract."""
+
+    tracks: list[Track] = []
+    for observation in observations:
+        track_name = f"track_{observation.track_id}"
+        history = histories.setdefault(track_name, [])
+        history.append(list(observation.bbox))
+        tracks.append(
+            Track(
+                track_id=track_name,
+                bbox=list(observation.bbox),
+                score=float(observation.confidence),
+                age=max(0, int(observation.age) - 1),
+                hits=int(observation.hits),
+                history=list(history),
+                metadata={
+                    "class_id": int(observation.class_id),
+                    "label": observation.label,
+                    "confirmed": bool(observation.confirmed),
+                    "association_cost": observation.association_cost,
+                    "predicted_centre": observation.predicted_centre,
+                    "predicted_size": observation.predicted_size,
+                },
+            )
+        )
+    return tracks
+
+
+def _custom_box_rows(
+    tracks: list[Track], frame_index: int, time_sec: float, filtered: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for track in tracks:
+        x, y, width, height = (float(value) for value in track.bbox)
+        entry = next((item for item in filtered if item["track"].track_id == track.track_id), None)
+        cues = _cue_values(entry) if entry else {}
+        rows.append(
+            {
+                "frame_index": frame_index,
+                "time_sec": f"{time_sec:.6f}",
+                "track_id": track.track_id,
+                "label": str(track.metadata.get("label", "streetlight")),
+                "score": f"{track.score:.6f}",
+                "x_center": f"{x:.3f}", "y_center": f"{y:.3f}", "width": f"{width:.3f}", "height": f"{height:.3f}",
+                "x1": f"{x - width / 2.0:.3f}", "y1": f"{y - height / 2.0:.3f}",
+                "x2": f"{x + width / 2.0:.3f}", "y2": f"{y + height / 2.0:.3f}",
+                "aggregate_score": f"{float(entry['aggregate_score']):.6f}" if entry else "",
+                "accepted": bool(entry["accepted"]) if entry else False,
+                "trajectory": f"{cues.get('trajectory', 0.0):.6f}" if entry else "",
+                "size_progression": f"{cues.get('size_progression', 0.0):.6f}" if entry else "",
+                "light_characteristics": f"{cues.get('light_characteristics', 0.0):.6f}" if entry else "",
+                "position_prior": f"{cues.get('position_prior', 0.0):.6f}" if entry else "",
+                "history_len": len(track.history) if entry else 0,
+            }
+        )
+    return rows
+
+
+def _custom_tracker_config(args: argparse.Namespace) -> TrackerConfig:
+    return TrackerConfig(
+        mode=args.tracking_mode,
+        max_age=args.max_age,
+        min_hits=args.min_hits,
+        max_center_distance=args.max_center_distance,
+        max_scale_distance=args.max_scale_distance,
+        center_weight=args.center_weight,
+        scale_weight=args.scale_weight,
+        kalman_process_noise=args.kalman_process_noise,
+        kalman_measurement_noise=args.kalman_measurement_noise,
+        debug=args.tracking_debug,
+    )
+
+
 def _update_track_stats(
     stats: dict[str, dict[str, Any]],
     frame_index: int,
@@ -309,7 +397,10 @@ def main() -> None:
     output_dir = resolve_repo_path(args.output_dir) if args.output_dir else default_output_dir(video_path, args.name)
     ensure_dir(output_dir)
     model_path = resolve_model_path(args.model, must_exist=not args.dry_run) if args.model else None
-    tracker_path = resolve_repo_path(args.tracker_config) if args.tracker_config else write_botsort_config(args, output_dir)
+    tracker_path = (
+        resolve_repo_path(args.tracker_config) if args.tracker_config else write_botsort_config(args, output_dir)
+    ) if args.tracker == "botsort" else None
+    custom_config = _custom_tracker_config(args) if args.tracker == "custom" else None
     save_video = not args.no_save_video
     labels_dir = (
         resolve_repo_path(args.labels_dir)
@@ -329,9 +420,11 @@ def main() -> None:
         "imgsz": args.imgsz,
         "device": args.device,
         "vid_stride": args.vid_stride,
-        "tracker": str(tracker_path),
-        "tracker_type": "botsort",
-        "camera_motion_compensation": {"enabled": True, "gmc_method": args.gmc_method},
+        "tracker": str(tracker_path) if tracker_path else "custom",
+        "tracker_type": args.tracker,
+        "tracking_mode": args.tracking_mode if args.tracker == "custom" else None,
+        "custom_tracker": custom_config.__dict__ if custom_config else None,
+        "camera_motion_compensation": {"enabled": True, "gmc_method": args.gmc_method} if args.tracker == "botsort" else {"enabled": bool(custom_config and custom_config.uses_ego_motion), "method": "sparse_lk_ransac_affine"},
         "multicue": {"enabled": not args.disable_multicue, "threshold": args.aggregation_threshold},
         "save_video": save_video,
     }
@@ -343,6 +436,7 @@ def main() -> None:
 
     metadata = video_metadata(video_path)
     model = detector.adapter.load(detector.resolved_checkpoint())
+    custom_tracker = CustomStreetlightTracker(custom_config) if custom_config else None
     multicue_stage = MultiCueFilterStage(
         CueWeights(),
         threshold=args.aggregation_threshold,
@@ -359,24 +453,31 @@ def main() -> None:
 
     jsonl_path = output_dir / "frames.jsonl"
     with jsonl_path.open("w", encoding="utf-8") as jsonl:
-        results = model.track(
-            source=str(video_path),
-            stream=True,
-            conf=args.conf,
-            iou=args.iou,
-            imgsz=args.imgsz,
-            device=args.device,
-            tracker=str(tracker_path),
-            persist=True,
-            vid_stride=args.vid_stride,
-            verbose=False,
-            save=False,
-        )
+        if custom_tracker is None:
+            results = model.track(
+                source=str(video_path), stream=True, conf=args.conf, iou=args.iou, imgsz=args.imgsz,
+                device=args.device, tracker=str(tracker_path), persist=True, vid_stride=args.vid_stride,
+                verbose=False, save=False,
+            )
+        else:
+            results = model.predict(
+                source=str(video_path), stream=True, conf=args.conf, iou=args.iou, imgsz=args.imgsz,
+                device=args.device, vid_stride=args.vid_stride, verbose=False, save=False,
+            )
         for frame_index, raw_result in enumerate(results, start=1):
             result = _coerce_result(raw_result)
             time_sec = _time_sec(frame_index, float(metadata["fps"]), args.vid_stride)
             detections = _result_to_detections(result)
-            tracks = _result_to_tracks(result, histories)
+            if custom_tracker is None:
+                tracks = _result_to_tracks(result, histories)
+                custom_observations: list[Any] = []
+            else:
+                custom_observations = custom_tracker.update(
+                    detections,
+                    frame=getattr(result, "orig_img", None) if result is not None else None,
+                    frame_id=frame_index,
+                )
+                tracks = _custom_tracks_to_domain(custom_observations, histories)
             frame_height = getattr(result, "orig_shape", [None, None])[0] if result is not None else None
             filtered = multicue_stage.run(tracks, frame_height=frame_height)
             accepted_tracks = [
@@ -403,7 +504,11 @@ def main() -> None:
                         accepted=entry["accepted"],
                     )
 
-            frame_detection_rows = _box_rows(result, frame_index, time_sec, filtered)
+            frame_detection_rows = (
+                _box_rows(result, frame_index, time_sec, filtered)
+                if custom_tracker is None
+                else _custom_box_rows(tracks, frame_index, time_sec, filtered)
+            )
             detection_rows.extend(frame_detection_rows)
             _update_track_stats(track_stats, frame_index, time_sec, filtered)
 
@@ -433,13 +538,18 @@ def main() -> None:
             )
 
             if save_video and result is not None:
-                plotted = result.plot()
+                plotted = result.plot() if custom_tracker is None else draw_tracks(result.orig_img, custom_observations, debug=args.tracking_debug)
                 if writer is None:
                     writer = _open_video_writer(annotated_video_path, float(metadata["fps"]), plotted)
                 writer.write(plotted)
 
     if writer is not None:
         writer.release()
+
+    if custom_tracker is not None and args.tracking_debug:
+        with (output_dir / "tracking_debug.jsonl").open("w", encoding="utf-8") as handle:
+            for record in custom_tracker.diagnostics:
+                handle.write(json.dumps(record) + "\n")
 
     track_rows = _track_summary_rows(track_stats)
     if args.enable_metrics and metrics is not None:

@@ -151,6 +151,7 @@ def _result_to_detections(result: Any) -> list[Detection]:
                 label=label,
                 source="detector",
                 metadata={
+                    "class_id": int(cls_id),
                     "xyxy": [float(v) for v in corners],
                     "orig_shape": list(getattr(result, "orig_shape", [])),
                     "path": str(getattr(result, "path", "")),

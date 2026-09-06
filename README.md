@@ -129,6 +129,32 @@ python3 -m src.evaluation.eval_pres.run_audit \
     --output-dir runs/audit/full_eval_run
 ```
 
+### Tracking Ablation
+
+The video runner can compare the existing BoT-SORT path with the lightweight
+streetlight-specific tracker. The custom tracker keeps the same downstream
+track/history and multi-cue interfaces while changing only association.
+
+```bash
+# Existing implementation (unchanged)
+python3 scripts/detection/run_video_pipeline.py --video /path/to/video.mp4 --tracker botsort
+
+# Controlled custom ablations
+python3 scripts/detection/run_video_pipeline.py --video /path/to/video.mp4 --tracker custom --tracking-mode centre
+python3 scripts/detection/run_video_pipeline.py --video /path/to/video.mp4 --tracker custom --tracking-mode centre_scale
+python3 scripts/detection/run_video_pipeline.py --video /path/to/video.mp4 --tracker custom --tracking-mode centre_scale_kalman
+python3 scripts/detection/run_video_pipeline.py --video /path/to/video.mp4 --tracker custom --tracking-mode centre_scale_kalman_ego
+```
+
+Use `--tracking-debug` to write per-frame association diagnostics and add
+predicted centres to the annotated video. The offline metric diagnostic accepts
+manually verified `frame,lamp_id,x1,y1,x2,y2` observations:
+
+```bash
+python3 scripts/detection/compare_association_metrics.py \
+  --input-csv verified_lamp_identities.csv --output-dir runs/association_metrics
+```
+
 ### Using the Location Prior
 If you have telemetry data and want to correlate detections with known GPS locations:
 

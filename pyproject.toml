@@ -59,6 +59,7 @@ packages = [
     "rbccps_od.review",
     "rbccps_od.training",
     "rbccps_annotator",
+    "tracker",
     "evaluation",
     "evaluation.eval_pres",
 ]
@@ -93,6 +94,7 @@ rbccps_od = "src/detection"
 "rbccps_od.review" = "src/detection/review"
 "rbccps_od.training" = "src/detection/training"
 rbccps_annotator = "src/annotator"
+tracker = "src/tracker"
 evaluation = "src/evaluation"
 "evaluation.eval_pres" = "src/evaluation/eval_pres"
 
