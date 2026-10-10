@@ -19,7 +19,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-train = ["ultralytics>=8.2.0", "pillow>=10.0.0", "wandb>=0.17.0"]
+train = ["ultralytics==8.4.51", "pillow>=10.0.0", "wandb>=0.17.0"]
+deployment = [
+    "onnx==1.22.0",
+    "onnxruntime==1.27.0",
+    "onnxslim==0.1.94",
+    "tensorflow==2.19.0",
+    "onnx2tf==1.28.8",
+    "ai-edge-litert==2.1.6",
+    "ncnn==1.0.20260526",
+]
 measurement = ["numpy>=1.26.0", "pillow>=10.0.0", "opencv-python>=4.9.0", "torch>=2.3.0"]
 annotator = ["opencv-python>=4.9.0", "numpy>=1.26.0"]
 dev = ["pytest>=8.0.0"]
@@ -55,6 +64,7 @@ packages = [
     "rbccps_od.domain",
     "rbccps_od.evaluation",
     "rbccps_od.io",
+    "rbccps_od.models",
     "rbccps_od.pipeline",
     "rbccps_od.review",
     "rbccps_od.training",
@@ -90,6 +100,7 @@ rbccps_od = "src/detection"
 "rbccps_od.domain" = "src/detection/domain"
 "rbccps_od.evaluation" = "src/detection/evaluation"
 "rbccps_od.io" = "src/detection/io"
+"rbccps_od.models" = "src/detection/models"
 "rbccps_od.pipeline" = "src/detection/pipeline"
 "rbccps_od.review" = "src/detection/review"
 "rbccps_od.training" = "src/detection/training"

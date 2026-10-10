@@ -40,6 +40,8 @@ class FineTuneConfig:
     negative_mask_root: Path | None = None
     negative_mask_loss_weight: float = 1.0
     mask_safe_augmentations: bool = True
+    uniform_mask_safe_augmentations: bool = False
+    resume_training: bool = False
 
 
 @dataclass(frozen=True)
@@ -119,7 +121,9 @@ def training_kwargs(config: FineTuneConfig) -> dict[str, Any]:
         "lr0": config.lr0,
         "weight_decay": config.weight_decay,
     }
-    if config.use_negative_attention and config.negative_mask_root is not None and config.mask_safe_augmentations:
+    if config.uniform_mask_safe_augmentations or (
+        config.use_negative_attention and config.negative_mask_root is not None and config.mask_safe_augmentations
+    ):
         kwargs.update(
             {
                 "degrees": 0.0,
@@ -132,6 +136,7 @@ def training_kwargs(config: FineTuneConfig) -> dict[str, Any]:
                 "mosaic": 0.0,
                 "mixup": 0.0,
                 "copy_paste": 0.0,
+                "cutmix": 0.0,
             }
         )
     return kwargs
@@ -166,6 +171,7 @@ def _safe_wandb_config(trainer: Any, config: FineTuneConfig) -> dict[str, Any]:
         "negative_mask_root": config.negative_mask_root,
         "negative_mask_loss_weight": config.negative_mask_loss_weight,
         "mask_safe_augmentations": config.mask_safe_augmentations,
+        "uniform_mask_safe_augmentations": config.uniform_mask_safe_augmentations,
         "ultralytics_args": vars(trainer.args),
     }
     if config.wandb and config.wandb.config:
@@ -276,18 +282,87 @@ def _run_dir_from(result: Any, yolo: Any, config: FineTuneConfig) -> Path:
 
 
 def run_yolo26m_finetune(config: FineTuneConfig) -> TrainingRunResult:
-    os.environ.setdefault("YOLO_CONFIG_DIR", str(ensure_dir(repo_root() / "_ultralytics_config")))
+    if "YOLO_CONFIG_DIR" not in os.environ:
+        os.environ["YOLO_CONFIG_DIR"] = str(ensure_dir(repo_root() / "_ultralytics_config"))
     _set_reproducible_seed(config.seed)
 
-    yolo = _build_yolo_for_config(config)
-    attach_wandb_callbacks(yolo, config)
     trainer = _trainer_for_config(config)
     train_args = training_kwargs(config)
+    expected_run_dir = (config.project / config.name).resolve()
+    last_checkpoint = expected_run_dir / "weights" / "last.pt"
+
+    if config.resume_training and last_checkpoint.exists():
+        from ultralytics import YOLO
+
+        yolo = YOLO(str(last_checkpoint))
+        checkpoint = yolo.ckpt or {}
+        _validate_resume_checkpoint(config, checkpoint, train_args, yolo.model)
+        best_checkpoint = expected_run_dir / "weights" / "best.pt"
+        saved_epoch = int(checkpoint.get("epoch", -1))
+        resumable = saved_epoch >= 0 and checkpoint.get("optimizer") is not None
+        if not resumable or saved_epoch + 1 >= config.epochs:
+            if not best_checkpoint.exists():
+                raise RuntimeError(
+                    f"Checkpoint cannot resume and no best.pt exists in {expected_run_dir / 'weights'}"
+                )
+            print(f"completed_training_run={expected_run_dir}")
+            return _training_run_result(expected_run_dir)
+        train_args["resume"] = True
+        print(f"resuming_training={last_checkpoint} from_epoch={saved_epoch + 1}")
+    else:
+        yolo = _build_yolo_for_config(config)
+        if config.resume_training:
+            # Keep the deterministic case directory so a later retry can find
+            # last.pt even if the first attempt failed before its first save.
+            train_args["exist_ok"] = True
+            print(f"no_resume_checkpoint={last_checkpoint}; starting_new_training_run")
+
+    attach_wandb_callbacks(yolo, config)
     if trainer is not None:
         result = yolo.train(trainer=trainer, **train_args)
     else:
         result = yolo.train(**train_args)
-    run_dir = _run_dir_from(result, yolo, config)
+    if trainer is not None:
+        from rbccps_od.models.yolo_ablation import assert_ablation_modules
+
+        assert_ablation_modules(
+            yolo.model,
+            use_geometry_attention=config.use_geometry_attention,
+            use_cse=config.use_cse,
+            use_negative_attention=config.use_negative_attention,
+        )
+    return _training_run_result(_run_dir_from(result, yolo, config))
+
+
+def _validate_resume_checkpoint(
+    config: FineTuneConfig,
+    checkpoint: dict[str, Any],
+    train_args: dict[str, Any],
+    pytorch_model: Any,
+) -> None:
+    from rbccps_od.models.yolo_ablation import assert_ablation_modules
+
+    assert_ablation_modules(
+        pytorch_model,
+        use_geometry_attention=config.use_geometry_attention,
+        use_cse=config.use_cse,
+        use_negative_attention=config.use_negative_attention,
+    )
+    saved_args = checkpoint.get("train_args") or {}
+    controls = (
+        "data", "imgsz", "epochs", "optimizer", "seed", "lr0", "weight_decay", "project", "name",
+        "degrees", "translate", "scale", "shear", "perspective", "flipud", "fliplr",
+        "mosaic", "mixup", "copy_paste", "cutmix",
+    )
+    for key in controls:
+        if key in saved_args and key in train_args and str(saved_args[key]) != str(train_args[key]):
+            raise ValueError(
+                f"Cannot resume {config.name}: checkpoint {key}={saved_args[key]!r} "
+                f"differs from requested {train_args[key]!r}."
+            )
+
+
+def _training_run_result(run_dir: Path) -> TrainingRunResult:
     weights_dir = run_dir / "weights"
     return TrainingRunResult(
         run_dir=run_dir,
@@ -316,17 +391,8 @@ def _set_reproducible_seed(seed: int) -> None:
 
 
 def _build_yolo_for_config(config: FineTuneConfig) -> Any:
-    if config.use_geometry_attention or config.use_cse or config.use_negative_attention:
-        from rbccps_od.models.yolo_ablation import build_yolo26_ablation_model
-
-        return build_yolo26_ablation_model(
-            config.model,
-            use_geometry_attention=config.use_geometry_attention,
-            use_cse=config.use_cse,
-            use_negative_attention=config.use_negative_attention,
-            negative_mask_loss_weight=config.negative_mask_loss_weight,
-        )
-
+    # Ultralytics train() rebuilds a trainer model from YAML and weights. Injecting
+    # ablation modules here would be discarded; the custom trainer installs them.
     try:
         from ultralytics import YOLO
     except ImportError as exc:
@@ -335,12 +401,18 @@ def _build_yolo_for_config(config: FineTuneConfig) -> Any:
 
 
 def _trainer_for_config(config: FineTuneConfig) -> Any | None:
-    if not config.use_negative_attention:
+    if not (config.use_geometry_attention or config.use_cse or config.use_negative_attention):
         return None
 
-    from rbccps_od.models.yolo_ablation import negative_mask_trainer
+    from rbccps_od.models.yolo_ablation import ablation_trainer
 
-    return negative_mask_trainer(config.negative_mask_root, loss_weight=config.negative_mask_loss_weight)
+    return ablation_trainer(
+        use_geometry_attention=config.use_geometry_attention,
+        use_cse=config.use_cse,
+        use_negative_attention=config.use_negative_attention,
+        mask_root=config.negative_mask_root,
+        loss_weight=config.negative_mask_loss_weight,
+    )
 
 
 def save_trained_weights(run: TrainingRunResult, artifact_dir: Path) -> dict[str, str]:

@@ -199,6 +199,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache", action="store_true", help="Enable Ultralytics dataset caching.")
     parser.add_argument("--close-mosaic", type=int, default=10, help="Disable mosaic augmentation in late epochs.")
     parser.add_argument("--exist-ok", action="store_true", help="Allow Ultralytics to reuse existing run names.")
+    parser.add_argument(
+        "--resume-training",
+        action="store_true",
+        help="Resume the exact case's project/name/weights/last.pt if it has remaining epochs; otherwise start fresh.",
+    )
     parser.add_argument("--wandb", action="store_true", help="Log each ablation run to Weights & Biases.")
     parser.add_argument("--wandb-project", default="rbccps-yolo26m-ablation", help="W&B project name.")
     parser.add_argument("--wandb-entity", default=None, help="Optional W&B entity/team.")
@@ -270,6 +275,11 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--uniform-mask-safe-augmentations",
+        action="store_true",
+        help="Use the negative-mask-safe geometric augmentation policy for every case in the factorial design.",
+    )
+    parser.add_argument(
         "--allow-dataset-negative-masks",
         action="store_true",
         help="Allow negative cases without --negative-mask-root when a custom dataset already provides masks.",
@@ -281,7 +291,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--prepare-only", action="store_true", help="Prepare and print configs without training.")
     parser.add_argument("--dry-run", action="store_true", help="Print configs without training.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.uniform_mask_safe_augmentations and args.allow_mask_unsafe_augmentations:
+        parser.error("--uniform-mask-safe-augmentations conflicts with --allow-mask-unsafe-augmentations")
+    return args
 
 
 def selected_experiments(values: list[str]) -> list[AblationExperiment]:
@@ -450,6 +463,7 @@ def _config_for(
                 "use_negative_attention": case.use_negative,
                 "negative_mask_loss_weight": getattr(args, "negative_mask_loss_weight", 1.0),
                 "mask_safe_augmentations": not getattr(args, "allow_mask_unsafe_augmentations", False),
+                "uniform_mask_safe_augmentations": getattr(args, "uniform_mask_safe_augmentations", False),
             },
         ),
         seed=getattr(args, "seed", 42),
@@ -462,6 +476,8 @@ def _config_for(
         negative_mask_root=_negative_mask_root(args),
         negative_mask_loss_weight=getattr(args, "negative_mask_loss_weight", 1.0),
         mask_safe_augmentations=not getattr(args, "allow_mask_unsafe_augmentations", False),
+        uniform_mask_safe_augmentations=getattr(args, "uniform_mask_safe_augmentations", False),
+        resume_training=getattr(args, "resume_training", False),
     )
 
 

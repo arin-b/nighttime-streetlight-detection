@@ -12,6 +12,7 @@ COMMAND_TO_MODULE = {
     "validate": "rbccps_od.training.validate",
     "build-tiled": "rbccps_od.datasets.tiled",
     "build-mixed": "rbccps_od.datasets.mixed_external",
+    "generate-synthetic": "rbccps_od.data_management.synthetic_cli",
     "download-models": "rbccps_od.models.downloader",
     "run-advanced-pipeline": "rbccps_od.pipeline.advanced_runner",
     "run-video-pipeline": "rbccps_od.pipeline.video_runner",

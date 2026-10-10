@@ -1,4 +1,7 @@
 from argparse import Namespace
+import json
+import os
+from types import SimpleNamespace
 from pathlib import Path
 
 from rbccps_od.training.benchmark_suite import (
@@ -50,8 +53,8 @@ def test_planned_dry_run_graph_counts(tmp_path: Path):
     assert diagnostics["expected_detector_runs"] == 8
     assert diagnostics["expected_detector_eval_runs"] == 8
     assert diagnostics["expected_pipeline_runs"] == 16
-    assert diagnostics["expected_deployment_runs"] == 80
-    assert diagnostics["expected_total_records"] == 113
+    assert diagnostics["expected_deployment_runs"] == 40
+    assert diagnostics["expected_total_records"] == 73
     assert set(DEPLOYMENT_FORMATS).issuperset(args.deployment_formats)
 
 
@@ -126,7 +129,7 @@ def test_legacy_calibration_data_alias_still_maps_to_dataset_yaml(tmp_path: Path
 
 def test_factorial_effects_computes_main_effects():
     rows = [
-        {"experiment_id": det.experiment_id, "case": det.case, "map50": idx / 10}
+        {"experiment_id": det.experiment_id, "case": det.case, "map50_95": idx / 10}
         for idx, det in enumerate(DETECTOR_GRID, start=1)
     ]
 
@@ -134,19 +137,45 @@ def test_factorial_effects_computes_main_effects():
 
     assert effects["available"] is True
     assert set(effects["main_effects"]) == {"cse", "negative_attention", "geometry_attention"}
+    assert len(effects["interaction_effects"]) == 4
 
 
-def test_shortlist_uses_measured_accuracy_efficiency_score():
+def test_shortlist_uses_pareto_efficient_pipeline_metrics():
     rows = [
-        {"experiment_id": "D1", "case": "baseline", "f1": 0.7, "map50": 0.8, "map50_95": 0.5, "fps": 30, "model_size_mb": 50},
-        {"experiment_id": "D2", "case": "cse", "f1": 0.8, "map50": 0.85, "map50_95": 0.55, "fps": 20, "model_size_mb": 60},
-        {"experiment_id": "D3", "case": "negative", "f1": 0.6, "map50": 0.7, "map50_95": 0.4, "fps": 80, "model_size_mb": 40},
+        {"experiment_id": "P1", "detector_id": "D1", "filtering_enabled": False,
+         "map50_95": 0.50, "precision": 0.7, "recall": 0.7, "fps": 30, "model_size_mb": 50},
+        {"experiment_id": "P2", "detector_id": "D2", "filtering_enabled": False,
+         "map50_95": 0.55, "precision": 0.8, "recall": 0.8, "fps": 20, "model_size_mb": 60},
+        {"experiment_id": "P3", "detector_id": "D3", "filtering_enabled": False,
+         "map50_95": 0.40, "precision": 0.6, "recall": 0.6, "fps": 15, "model_size_mb": 70},
     ]
 
     shortlist = select_deployment_shortlist(rows, limit=2)
 
-    assert [item["experiment_id"] for item in shortlist] == ["D2", "D1"]
-    assert "selection_rule" in shortlist[0]
+    assert [item["experiment_id"] for item in shortlist] == ["P2", "P1"]
+    assert all("Pareto" in item["selection_rule"] for item in shortlist)
+    assert select_deployment_shortlist(rows, limit=2, min_precision=0.75) == [shortlist[0]]
+
+
+def test_deployment_record_has_one_export_command_and_a_matching_audit_command(tmp_path: Path):
+    from rbccps_od.training.benchmark_suite import _deployment_audit_command
+    args = parse_args([
+        "--stage", "deployment", "--output-root", str(tmp_path),
+        "--pipeline-video", str(tmp_path / "clip.mp4"), "--gt-labels", str(tmp_path / "labels"),
+        "--shortlist-size", "1",
+    ])
+    record = planned_records(args)[0]
+
+    assert record.experiment_id == "P1_TFLITE_FP32"
+    assert record.metadata["pipeline_id"] == "P1"
+    assert record.metadata["format"] == "tflite_fp32"
+    assert "&&" not in record.command
+    command = _deployment_audit_command(args, record, tmp_path / "best.tflite")
+    assert "--disable-multicue" in command
+    assert "--gt-labels" in command
+    assert "--device" in command
+    assert "cpu" in command
+
 
 
 def test_aggregate_results_reads_existing_audit_report(tmp_path: Path):
@@ -173,3 +202,68 @@ def test_aggregate_results_reads_existing_audit_report(tmp_path: Path):
     assert summary["pipelines"][0]["false_positives_per_frame"] == 0.2
     assert (tmp_path / "aggregated" / "pipeline_results.csv").exists()
     assert (tmp_path / "reports" / "final_report.md").exists()
+
+
+
+def test_deployment_execution_reuses_export_and_writes_heldout_metrics(tmp_path: Path, monkeypatch):
+    import rbccps_od.training.benchmark_suite as suite
+
+    args = parse_args([
+        "--stage", "deployment", "--output-root", str(tmp_path),
+        "--pipeline-video", str(tmp_path / "clip.mp4"),
+        "--gt-labels", str(tmp_path / "labels"),
+        "--shortlist-size", "1", "--artifact-root", str(tmp_path / "artifacts"),
+    ])
+    record = planned_records(args)[0]
+    checkpoint = Path(record.metadata["checkpoint"])
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"checkpoint")
+    exported = Path(record.metadata["export_dir"]) / "tflite_fp32" / "model.tflite"
+    exported.parent.mkdir(parents=True)
+    exported.write_bytes(b"exported")
+    os.utime(exported, (checkpoint.stat().st_mtime + 1, checkpoint.stat().st_mtime + 1))
+    (Path(record.metadata["export_dir"]) / "export_report.json").write_text(json.dumps({
+        "results": [{"format_name": "tflite_fp32", "status": "success", "output_path": str(exported)}],
+    }), encoding="utf-8")
+
+    def fake_run(command, **_kwargs):
+        assert "evaluation.eval_pres.run_audit" in command
+        audit_dir = Path(record.artifact_dir)
+        audit_dir.mkdir(parents=True)
+        (audit_dir / "audit_report.json").write_text(json.dumps({
+            "video": {"frame_count": 3},
+            "evaluation_metrics": {
+                "detection": {"AP@0.5": 0.5, "mAP@0.5:0.95": 0.3},
+                "frame_detection": {"precision": 0.5, "recall": 0.6, "f1": 0.545, "fp": 1},
+                "evaluation_context": {"frames_evaluated": 3},
+            },
+        }), encoding="utf-8")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(suite.subprocess, "run", fake_run)
+    log = tmp_path / "logs" / "deployment.log"
+    log.parent.mkdir(parents=True)
+    result = suite._execute_deployment_record(args, record, log)
+
+    assert result.status == "success"
+    assert result.metadata["exported_model"] == str(exported)
+    timing = json.loads((Path(record.artifact_dir) / "benchmark_timing.json").read_text())
+    assert timing["frames_evaluated"] == 3
+    assert timing["model_size_mb"] is not None
+
+
+def test_stage_provenance_allows_deployment_expansion_and_ignores_report(tmp_path: Path):
+    from rbccps_od.training.benchmark_suite import _run_signature, _stage_signature_mismatches
+    shortlist = parse_args(["--output-root", str(tmp_path), "--deployment-mode", "shortlist"])
+    expanded = parse_args(["--output-root", str(tmp_path), "--deployment-mode", "all", "--resume"])
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir()
+    (manifest_dir / "deployment_P1_TFLITE_FP32.json").write_text(json.dumps({
+        "stage": "deployment", "experiment_id": "P1_TFLITE_FP32",
+        "status": "success", "run_signature": _run_signature(shortlist),
+    }))
+    (manifest_dir / "report_REPORT.json").write_text(json.dumps({
+        "stage": "report", "experiment_id": "REPORT", "status": "success",
+        "run_signature": {"imgsz": 999},
+    }))
+    assert _stage_signature_mismatches(expanded, manifest_dir) == []

@@ -1,0 +1,1344 @@
+CODING AGENT PROMPT — NIGHTTIME STREETLIGHT SYNTHETIC DATA GENERATION PIPELINE
+
+You are implementing a reproducible synthetic-data generation pipeline for the Nighttime Streetlight Detection project.
+
+The accompanying document Streetlight_Data_Synthesis_Plan.docx is the conceptual specification for this work. Read it completely before modifying any code.
+
+Your task is to implement the data-generation pipeline described below, integrate it cleanly with the existing repository, and provide a CLI that allows the synthesis process to be configured without modifying source code.
+
+Do NOT begin by generating the full dataset. First inspect the existing repository, dataset structure, annotation format, image dimensions, existing preprocessing/augmentation code, and any existing frame-extraction utilities. Reuse existing project conventions where appropriate.
+
+The objective is to generate synthetic counterfactual nighttime images in which the illumination state of real streetlights is modified while the underlying physical scene remains unchanged.
+
+The fundamental principle is:
+
+SAME REAL SCENE
+    ↓
+SAME STREETLIGHT GEOMETRY
+    ↓
+CHANGE ONLY ILLUMINATION STATE
+    ↓
+working / dim / severely dim / flickering / off
+
+The detector must therefore learn that:
+
+streetlight identity ≠ brightness
+
+rather than learning:
+
+bright light source = streetlight
+
+The synthetic dataset must be reproducible, auditable, and suitable for a research paper.
+
+============================================================
+
+FIRST: INSPECT THE EXISTING CODEBASE
+============================================================
+
+Before implementing anything:
+
+Identify:
+image dataset directories
+annotation directories
+train/val/test split definitions
+annotation format
+class IDs and class names
+existing preprocessing/augmentation code
+existing YOLO training/evaluation code
+any frame extraction scripts
+any dataset-generation utilities
+configuration conventions
+existing CLI conventions
+Determine exactly how the existing annotations represent:
+Full Streetlight
+Bulb/Halo Only
+Pole, if present
+illumination segmentation, if present
+Do not assume that annotation class IDs have any particular numerical values.
+Do not silently modify the existing dataset.
+Do not silently change train/validation/test splits.
+If the repository already has utilities for reading YOLO annotations, reuse them rather than creating duplicate implementations.
+Before coding, provide a concise implementation plan describing:
+files you will add
+files you will modify
+configuration structure
+data flow
+how annotations will be inherited
+how provenance metadata will be stored
+
+Only after this inspection should implementation begin.
+
+============================================================
+2. HIGH-LEVEL PIPELINE
+
+Implement the following pipeline:
+
+ORIGINAL VIDEOS / EXISTING IMAGES
+            ↓
+FRAME PROVENANCE
+            ↓
+CANDIDATE FRAME POOL
+            ↓
+TEMPORAL DUPLICATE FILTER
+            ↓
+VISUAL NEAR-DUPLICATE FILTER
+            ↓
+SCENE DIFFICULTY CLASSIFICATION
+            ↓
+   ┌────────┴─────────┐
+   ↓                  ↓
+ORDINARY         CONFOUNDER-HEAVY
+  60%                  40%
+   └────────┬─────────┘
+            ↓
+STREETLIGHT REGION SELECTION
+            ↓
+ILLUMINATION TRANSFORMATION
+            ↓
+SYNTHETIC IMAGE
+            ↓
+INHERITED / UPDATED ANNOTATIONS
+            ↓
+METADATA
+            ↓
+QUALITY-CONTROL REPORT
+            ↓
+SYNTHETIC DATASET
+
+The 40% confounder-heavy requirement applies to the generated synthetic image pool.
+
+============================================================
+3. IMPORTANT DATA-INTEGRITY RULES
+
+The implementation MUST obey the following:
+
+A. Never modify original images.
+
+B. Never modify original annotations.
+
+C. Every synthetic image must have a record identifying its exact source image.
+
+D. Every synthetic image must have its transformation parameters recorded.
+
+E. Synthetic variants derived from the same source image must be traceable to one common source ID.
+
+F. Train/validation/test leakage must be prevented.
+
+If a source image belongs to validation or test, do NOT generate a synthetic training image from it.
+
+More generally:
+
+source_scene_id
+
+must be treated as the unit of dataset splitting.
+
+Never create:
+
+source.jpg       → training
+source_dim.jpg  → validation
+
+or any equivalent leakage.
+
+G. The primary evaluation dataset must remain real and untouched.
+
+============================================================
+4. CONFIGURATION
+
+Implement configuration through YAML or JSON, preferably matching the repository's existing configuration style.
+
+The configuration should expose at least:
+
+input_images
+input_annotations
+output_images
+output_annotations
+output_metadata
+
+candidate_sampling
+
+temporal_exclusion_seconds
+perceptual_duplicate_threshold
+
+synthetic_fraction
+
+confounder_fraction = 0.40
+
+ordinary_fraction = 0.60
+
+illumination_states:
+    dim
+    severe_dim
+    flicker
+    off
+    mixed
+
+state_probabilities
+
+dimming_severity_range
+
+flicker_parameters
+
+number_of_variants_per_source
+
+random_seed
+
+dry_run
+
+overwrite
+
+generate_preview
+
+The user must be able to change these values from the command line/configuration rather than editing Python source.
+
+============================================================
+5. CLI
+
+Provide a command-line interface along the lines of:
+
+python -m <appropriate_module> generate \
+    --config configs/synthetic_data.yaml
+
+or whatever CLI convention best fits the repository.
+
+Also support:
+
+--dry-run
+
+which performs source selection and reports what would be generated without writing the full dataset.
+
+Provide:
+
+--limit N
+
+for generating only N synthetic images during development/testing.
+
+Provide:
+
+--seed N
+
+to override the configured random seed.
+
+Provide:
+
+--preview
+
+to generate a small contact sheet or preview set if practical.
+
+Provide a command or mode that reports dataset statistics after generation.
+
+============================================================
+6. FRAME PROVENANCE
+
+The existing dataset was extracted using FFmpeg rather than OpenCV.
+
+Do NOT assume:
+
+frame_number / FPS
+
+is always the exact source timestamp.
+
+The implementation should support provenance metadata such as:
+
+source_video
+source_frame_index
+source_timestamp
+source_image
+source_scene_id
+
+If the timestamp is unavailable for an existing image, do not invent a timestamp.
+
+Instead record:
+
+source_timestamp: null
+
+and make the provenance state explicit.
+
+If FFmpeg frame timestamps can be recovered from the source video, use actual presentation timestamps where available.
+
+The implementation should be compatible with a future workflow in which FFmpeg is used to extract candidate frames.
+
+============================================================
+7. DUPLICATE / REDUNDANCY FILTERING
+
+Implement two levels of redundancy filtering.
+
+LEVEL 1 — temporal filtering
+
+Reject candidate frames that occur too close to a previously selected frame from the same source video.
+
+The threshold must be configurable.
+
+For example:
+
+temporal_exclusion_seconds = 1.0
+
+Do not hard-code this value.
+
+LEVEL 2 — visual filtering
+
+Use a lightweight perceptual similarity mechanism.
+
+Recommended progression:
+
+exact hash
+    ↓
+perceptual hash
+    ↓
+optional stronger comparison for borderline cases
+
+The exact method can be selected based on existing dependencies.
+
+Do NOT blindly compare every candidate against every existing frame if this creates an O(N²) bottleneck.
+
+Use a practical indexing/windowing strategy.
+
+The objective is:
+
+remove near-identical frames
+
+not:
+
+maximize mathematical image diversity at any cost.
+
+The thresholds must be configurable.
+
+The system must log how many candidates were removed by:
+
+exact duplicate filtering
+temporal filtering
+perceptual filtering
+============================================================
+8. SCENE DIFFICULTY / CONFOUNDER CLASSIFICATION
+
+The synthetic dataset must contain approximately:
+
+60% ordinary scenes
+40% confounder-heavy scenes
+
+The confounder-heavy scenes should preferably be REAL frames that already contain strong competing light sources.
+
+Relevant confounders include:
+
+vehicle headlights
+brake lights
+illuminated shop signs
+storefronts
+illuminated windows
+traffic signals
+advertisements
+road reflections
+strong glare
+dense nighttime traffic
+multiple unrelated bright objects
+
+Do NOT artificially create confounders merely to satisfy the 40% requirement.
+
+Prefer real confounder-rich source frames.
+
+Implement an automatic confounder-scoring mechanism where practical.
+
+However, do not pretend that the automatic classifier is semantically perfect.
+
+The implementation should therefore support:
+
+automatically classified scenes
+
+and optionally:
+
+manually approved scene categories
+
+if a human-curated CSV/JSON is provided.
+
+For example:
+
+scene_id,category
+scene_001,confounder_heavy
+scene_002,ordinary
+
+The manually supplied classification must override automatic classification.
+
+The system should report:
+
+total ordinary candidates
+total confounder-heavy candidates
+selected ordinary candidates
+selected confounder-heavy candidates
+
+If there are insufficient confounder-heavy candidates to satisfy 40%, DO NOT fabricate the ratio silently.
+
+Instead issue a clear warning/error describing the shortage.
+
+============================================================
+9. STREETLIGHT REGION SELECTION
+
+Use existing annotations wherever possible.
+
+The transformation should primarily target the luminous lamp/halo region.
+
+Do NOT simply darken the entire streetlight bounding box if that bounding box contains a substantial portion of the physical pole.
+
+The desired conceptual decomposition is:
+
+physical structure
+      +
+luminous component
+
+The luminous component should be modified.
+
+The pole/physical structure should remain.
+
+If the dataset contains a dedicated Bulb/Halo Only annotation, use it as the primary illumination region.
+
+If only a Full Streetlight bounding box exists, implement a conservative fallback and clearly document it.
+
+Do not invent a precise pixel-level lamp mask from a bounding box and then claim that it is ground-truth segmentation.
+
+Any automatically generated soft mask must be explicitly treated as a synthesis mask.
+
+============================================================
+10. SOFT ILLUMINATION MASK
+
+The transformation must use a soft spatial mask.
+
+Never perform:
+
+image[y1:y2, x1:x2] *= alpha
+
+with a hard rectangular boundary as the primary implementation.
+
+Instead construct a smooth mask:
+
+M(x,y) ∈ [0,1]
+
+with:
+
+M ≈ 1
+
+near the luminous source and
+
+M → 0
+
+smoothly away from it.
+
+The mask should preferably be based on the bulb/halo region.
+
+Possible implementation:
+
+binary region
+    ↓
+distance transform / Gaussian smoothing
+    ↓
+normalized soft mask
+
+The exact implementation may be selected based on image-processing libraries already used by the repository.
+
+The mask must be visualized during preview generation.
+
+============================================================
+11. DIM TRANSFORMATION
+
+Implement:
+
+T_dim(I, M, α)
+
+Conceptually:
+
+I'(x) = I(x) * [1 - M(x) * (1 - α)]
+
+where:
+
+α ∈ (0,1)
+
+is the residual illumination factor.
+
+Interpretation:
+
+α = 1.0 → unchanged
+α ≈ 0.7 → mildly dim
+α ≈ 0.4 → moderately dim
+α ≈ 0.15 → severely dim
+
+These values are examples, not mandatory fixed values.
+
+Use configurable ranges.
+
+The transformation must:
+
+preserve geometry
+preserve object boundaries
+preserve the pole
+preserve unrelated objects
+avoid hard mask boundaries
+
+Do not use a single fixed α for every image.
+
+Sample from configurable severity ranges using the configured random seed.
+
+============================================================
+12. OFF TRANSFORMATION
+
+Implement:
+
+T_off(I, M)
+
+The off transformation should remove most direct luminous emission while retaining the physical streetlight structure.
+
+Do NOT:
+
+erase the streetlight
+replace the streetlight with background
+black out the whole bounding box
+
+The desired result is:
+
+bright lamp
+    ↓
+physically present but non-emitting lamp
+
+The pole and fixture should remain visible whenever they were visible in the original.
+
+The halo should be strongly suppressed.
+
+Use conservative local attenuation rather than global scene darkening.
+
+============================================================
+13. FLICKER TRANSFORMATION
+
+Implement flickering as a family of illumination states.
+
+Do not merely apply random image noise.
+
+The important variable is illumination intensity.
+
+For example:
+
+high
+medium-high
+medium-low
+low
+near-off
+
+For a single image, generate one plausible flicker state.
+
+If temporal source frames are available, optionally support temporal flicker sequences in a later extension.
+
+Do not make perfectly periodic flickering a requirement.
+
+Randomize intensity using configurable distributions.
+
+Record the sampled flicker parameters in metadata.
+
+============================================================
+14. MIXED STREETLIGHT STATES
+
+Implement an optional mixed mode in which different streetlights in one frame receive different illumination states.
+
+Example:
+
+Streetlight A → working
+Streetlight B → dim
+Streetlight C → off
+Streetlight D → severe dim
+
+This is useful because real roads may contain partially failed lighting systems.
+
+Do not apply transformations to every streetlight automatically.
+
+Select a configurable subset of eligible lights.
+
+============================================================
+15. PRESERVING CONFOUNDERS
+
+This is critical.
+
+For the 40% confounder-heavy subset:
+
+headlights
+brake lights
+signs
+windows
+advertisements
+reflections
+traffic signals
+
+must remain essentially unchanged.
+
+The synthetic intervention should be:
+
+change STREETLIGHT
+
+while:
+
+keep CONFUNDERS
+
+constant.
+
+For example:
+
+REAL:
+    streetlight = bright
+    shop sign = bright
+    headlights = bright
+
+SYNTHETIC:
+    streetlight = dim
+    shop sign = bright
+    headlights = bright
+
+This is one of the principal scientific motivations for the entire augmentation strategy.
+
+============================================================
+16. ANNOTATIONS
+
+When only illumination appearance changes:
+
+object geometry does not change
+
+Therefore:
+
+Full Streetlight bounding boxes → unchanged
+Bulb/Halo Only bounding boxes → unchanged
+Pole bounding boxes → unchanged
+
+Copy annotations from the source image rather than regenerating them.
+
+Do not modify coordinates unless the transformation explicitly changes geometry, which it should not.
+
+If illumination segmentation labels exist, treat them separately.
+
+If the illumination mask represents emitted/spill illumination, an off/dim transformation may require a regenerated mask.
+
+Do NOT blindly copy an illumination mask if doing so would make the synthetic supervision physically inconsistent.
+
+Document exactly what happens to each annotation type.
+
+============================================================
+17. SYNTHETIC IMAGE NAMING
+
+Every generated image should have an unambiguous identifier.
+
+For example:
+
+<source_id>__<variant_id>__<state>__<severity>.jpg
+
+Do not rely solely on sequential filenames.
+
+The filename should make debugging possible.
+
+============================================================
+18. METADATA
+
+Create one machine-readable metadata file, preferably JSONL or CSV.
+
+Each synthetic sample should contain at least:
+
+synthetic_id
+source_image
+source_scene_id
+source_video
+source_frame_index
+source_timestamp
+
+confounder_category
+confounder_score
+
+transformation
+illumination_state
+severity
+
+selected_light_ids
+
+random_seed
+
+generation_version
+
+timestamp_created
+
+For example:
+
+{
+"synthetic_id": "...",
+"source_image": "...",
+"source_scene_id": "...",
+"source_timestamp": 137.0,
+"confounder_category": "confounder_heavy",
+"transformation": "dim",
+"illumination_state": "moderate_dim",
+"severity": 0.43,
+"selected_light_ids": [2, 4],
+"random_seed": 12345,
+"generation_version": "v1.0"
+}
+
+The exact schema can be adapted to the repository, but provenance must never be lost.
+
+============================================================
+19. QUALITY CONTROL
+
+Implement a preview mode.
+
+For selected examples, produce side-by-side:
+
+ORIGINAL | SYNTHETIC
+
+and preferably:
+
+ORIGINAL | MASK | SYNTHETIC
+
+This is extremely important.
+
+The preview should make it easy to detect:
+
+hard mask boundaries
+unnatural dark regions
+accidental modification of vehicles
+accidental modification of shop signs
+pole destruction
+halos with unnatural shapes
+colour artifacts
+over-darkening
+obvious synthetic signatures
+
+Do not scale to thousands of samples until the pilot preview has been inspected.
+
+============================================================
+20. DATASET STATISTICS
+
+After generation, print and/or save a report containing:
+
+number of source images
+number of candidate images
+number rejected as duplicates
+number selected
+number ordinary
+number confounder-heavy
+actual confounder percentage
+
+number dim
+number severe_dim
+number flicker
+number off
+number mixed
+
+number of synthetic images per source
+number of unique source scenes
+
+Also report any failed transformations.
+
+The report must make it immediately obvious if the requested 40% confounder-heavy target was not achieved.
+
+============================================================
+21. RANDOMNESS AND REPRODUCIBILITY
+
+All stochastic operations must use a controlled random generator.
+
+Do not use uncontrolled calls to random functions throughout the code.
+
+The seed must be configurable.
+
+The metadata must store the seed or transformation parameters necessary to reproduce the sample.
+
+Running the same pipeline twice with:
+
+same input
+same configuration
+same seed
+same software version
+
+should produce equivalent outputs.
+
+============================================================
+22. PIL / OPENCV / NUMPY / OTHER LIBRARIES
+
+Use the repository's existing image-processing stack where practical.
+
+Do not introduce heavy dependencies merely to implement simple local illumination transformations.
+
+If a new dependency is genuinely required:
+
+explain why
+add it to the appropriate dependency file
+ensure installation is documented
+
+Avoid implementing functionality that already exists elsewhere in the repository.
+
+============================================================
+23. TESTS
+
+Write tests for the important deterministic components.
+
+At minimum test:
+
+annotation loading
+annotation copying
+mask generation
+dim transformation
+off transformation
+severity handling
+metadata creation
+deterministic seed behaviour
+duplicate filtering
+40% confounder selection logic
+
+The tests should not require the entire dataset.
+
+Use small synthetic test images where possible.
+
+============================================================
+24. IMPLEMENTATION ORDER
+
+Implement in this order:
+
+STEP 1
+Inspect repository and report structure.
+
+STEP 2
+Implement configuration + CLI.
+
+STEP 3
+Implement source-frame/provenance handling.
+
+STEP 4
+Implement exact/temporal/perceptual duplicate filtering.
+
+STEP 5
+Implement scene difficulty classification.
+
+STEP 6
+Implement streetlight region extraction.
+
+STEP 7
+Implement soft illumination masks.
+
+STEP 8
+Implement dim transformation.
+
+STEP 9
+Implement off transformation.
+
+STEP 10
+Implement flicker transformation.
+
+STEP 11
+Implement mixed-state transformation.
+
+STEP 12
+Implement annotation inheritance.
+
+STEP 13
+Implement metadata.
+
+STEP 14
+Implement preview generation.
+
+STEP 15
+Implement dataset statistics/reporting.
+
+STEP 16
+Implement tests.
+
+STEP 17
+Run a SMALL PILOT ONLY.
+
+Do not generate the full dataset until the pilot has been reviewed.
+
+============================================================
+25. PRECISE PSEUDOCODE
+
+Use the following pseudocode as the logical specification.
+
+MAIN PIPELINE
+
+FUNCTION main(config):
+
+set_global_seed(config.random_seed)
+
+repo_info = inspect_repository()
+
+validate_configuration(config, repo_info)
+
+source_records = load_source_records(
+    image_dir=config.input_images,
+    annotation_dir=config.input_annotations
+)
+
+IF config.source_manifest EXISTS:
+    source_records = attach_source_provenance(
+        source_records,
+        config.source_manifest
+    )
+
+candidates = []
+
+FOR record IN source_records:
+
+    IF record.split IN ["val", "test"]:
+        CONTINUE
+
+    IF record.is_invalid:
+        CONTINUE
+
+    IF has_eligible_streetlight(record):
+        candidates.append(record)
+
+candidates = temporal_duplicate_filter(
+    candidates,
+    exclusion_seconds=config.temporal_exclusion_seconds
+)
+
+candidates = perceptual_duplicate_filter(
+    candidates,
+    threshold=config.perceptual_duplicate_threshold
+)
+
+scene_labels = classify_scene_difficulty(
+    candidates,
+    manual_labels=config.manual_scene_labels
+)
+
+ordinary = FILTER candidates WHERE
+    scene_labels[id] == "ordinary"
+
+confounder_heavy = FILTER candidates WHERE
+    scene_labels[id] == "confounder_heavy"
+
+selected = select_source_frames(
+    ordinary=ordinary,
+    confounder_heavy=confounder_heavy,
+    desired_confounder_fraction=0.40,
+    desired_total=config.number_of_source_frames,
+    seed=config.random_seed
+)
+
+generation_records = []
+
+FOR source IN selected:
+
+    annotations = load_annotations(source)
+
+    eligible_lights = extract_eligible_streetlights(
+        annotations,
+        class_mapping=repo_info.class_mapping
+    )
+
+    IF eligible_lights IS EMPTY:
+        CONTINUE
+
+    number_of_variants = sample_variant_count(
+        config.number_of_variants_per_source
+    )
+
+    FOR variant_index IN range(number_of_variants):
+
+        rng = create_deterministic_rng(
+            config.random_seed,
+            source.id,
+            variant_index
+        )
+
+        state = sample_illumination_state(
+            config.state_probabilities,
+            rng
+        )
+
+        selected_lights = select_lights(
+            eligible_lights,
+            state=state,
+            config=config,
+            rng=rng
+        )
+
+        synthetic_image = copy(source.image)
+
+        transformation_records = []
+
+        FOR light IN selected_lights:
+
+            region = determine_luminous_region(
+                light,
+                annotations
+            )
+
+            soft_mask = create_soft_illumination_mask(
+                region,
+                image_shape=source.image.shape,
+                config=config
+            )
+
+            IF state == "dim":
+                severity = sample_dim_severity(rng, config)
+
+                synthetic_image = apply_dim(
+                    synthetic_image,
+                    soft_mask,
+                    severity
+                )
+
+            ELSE IF state == "severe_dim":
+                severity = sample_severe_dim_severity(rng, config)
+
+                synthetic_image = apply_dim(
+                    synthetic_image,
+                    soft_mask,
+                    severity
+                )
+
+            ELSE IF state == "flicker":
+                severity = sample_flicker_state(rng, config)
+
+                synthetic_image = apply_flicker_state(
+                    synthetic_image,
+                    soft_mask,
+                    severity
+                )
+
+            ELSE IF state == "off":
+                synthetic_image = apply_off(
+                    synthetic_image,
+                    soft_mask,
+                    config
+                )
+
+            transformation_records.append({
+                "light_id": light.id,
+                "state": state,
+                "severity": severity_if_defined
+            })
+
+        synthetic_annotations = copy_annotations(
+            annotations
+        )
+
+        IF illumination_masks_exist(annotations):
+            synthetic_annotations = handle_illumination_masks(
+                source_annotations=annotations,
+                synthetic_image=synthetic_image,
+                transformations=transformation_records,
+                config=config
+            )
+
+        synthetic_id = generate_synthetic_id(
+            source,
+            variant_index,
+            state
+        )
+
+        output_image_path = save_image(
+            synthetic_image,
+            synthetic_id,
+            config.output_images
+        )
+
+        output_annotation_path = save_annotations(
+            synthetic_annotations,
+            synthetic_id,
+            config.output_annotations
+        )
+
+        metadata = create_metadata(
+            synthetic_id=synthetic_id,
+            source=source,
+            state=state,
+            transformations=transformation_records,
+            seed=config.random_seed,
+            generation_version=config.generation_version
+        )
+
+        save_metadata(metadata, config.output_metadata)
+
+        IF config.generate_preview:
+            save_preview(
+                original=source.image,
+                mask=combined_masks,
+                synthetic=synthetic_image,
+                metadata=metadata
+            )
+
+        generation_records.append(metadata)
+
+report = generate_dataset_report(
+    source_records=source_records,
+    candidates=candidates,
+    selected=selected,
+    generated=generation_records
+)
+
+save_report(report)
+
+print_report(report)
+CONF0UNDER SELECTION
+
+FUNCTION select_source_frames(
+ordinary,
+confounder_heavy,
+desired_confounder_fraction,
+desired_total,
+seed
+):
+
+target_confounded =
+    ROUND(desired_total * desired_confounder_fraction)
+
+target_ordinary =
+    desired_total - target_confounded
+
+IF len(confounder_heavy) < target_confounded:
+    WARN(
+        "Insufficient confounder-heavy source frames."
+    )
+
+    target_confounded = len(confounder_heavy)
+
+    target_ordinary =
+        MIN(
+            len(ordinary),
+            desired_total - target_confounded
+        )
+
+selected_confounded =
+    diversity_aware_sample(
+        confounder_heavy,
+        target_confounded,
+        seed
+    )
+
+selected_ordinary =
+    diversity_aware_sample(
+        ordinary,
+        target_ordinary,
+        seed
+    )
+
+RETURN selected_confounded + selected_ordinary
+DUPLICATE FILTER
+
+FUNCTION temporal_duplicate_filter(records, exclusion_seconds):
+
+selected = []
+
+group records BY source_video
+
+FOR each video_group:
+
+    SORT video_group BY source_timestamp
+
+    last_selected_timestamp = NULL
+
+    FOR record IN video_group:
+
+        IF record.source_timestamp IS NULL:
+            selected.append(record)
+            CONTINUE
+
+        IF last_selected_timestamp IS NULL:
+            selected.append(record)
+            last_selected_timestamp =
+                record.source_timestamp
+            CONTINUE
+
+        IF (
+            record.source_timestamp -
+            last_selected_timestamp
+        ) >= exclusion_seconds:
+
+            selected.append(record)
+
+            last_selected_timestamp =
+                record.source_timestamp
+
+RETURN selected
+
+FUNCTION perceptual_duplicate_filter(records, threshold):
+
+selected = []
+
+FOR record IN records:
+
+    fingerprint = compute_perceptual_fingerprint(
+        record.image
+    )
+
+    IF no_similar_selected_image(
+        fingerprint,
+        selected,
+        threshold
+    ):
+        selected.append(record)
+
+RETURN selected
+SOFT MASK
+
+FUNCTION create_soft_illumination_mask(region, image_shape, config):
+
+binary_mask = rasterize_region(
+    region,
+    image_shape
+)
+
+expanded_mask = optional_region_expansion(
+    binary_mask,
+    config.mask_expansion
+)
+
+soft_mask = gaussian_blur(
+    expanded_mask,
+    sigma=config.mask_sigma
+)
+
+soft_mask = normalize_to_0_1(
+    soft_mask
+)
+
+RETURN soft_mask
+DIM
+
+FUNCTION apply_dim(image, mask, severity):
+
+residual = severity
+
+attenuation =
+    1 - mask * (1 - residual)
+
+output = image * attenuation
+
+output = clip_to_valid_image_range(output)
+
+RETURN output
+OFF
+
+FUNCTION apply_off(image, mask, config):
+
+residual = config.off_residual_intensity
+
+attenuation =
+    1 - mask * (1 - residual)
+
+output = image * attenuation
+
+output = clip_to_valid_image_range(output)
+
+RETURN output
+FLICKER
+
+FUNCTION apply_flicker_state(image, mask, flicker_level):
+
+residual = flicker_level
+
+attenuation =
+    1 - mask * (1 - residual)
+
+output = image * attenuation
+
+output = clip_to_valid_image_range(output)
+
+RETURN output
+DETERMINISTIC RNG
+
+FUNCTION create_deterministic_rng(global_seed, source_id, variant):
+
+derived_seed =
+    stable_hash(
+        global_seed,
+        source_id,
+        variant
+    )
+
+RETURN RNG(derived_seed)
+ANNOTATIONS
+
+FUNCTION copy_annotations(source_annotations):
+
+destination_annotations =
+    deep_copy(source_annotations)
+
+RETURN destination_annotations
+QUALITY CONTROL
+
+FUNCTION validate_synthetic_sample(
+original,
+synthetic,
+masks,
+annotations
+):
+
+CHECK dimensions(original, synthetic)
+
+CHECK no_nan_values(synthetic)
+
+CHECK pixel_range(synthetic)
+
+CHECK annotations_valid(annotations)
+
+CHECK mask_bounds_valid(masks)
+
+CHECK no_unexpected_geometry_change(
+    original,
+    synthetic
+)
+
+RETURN validation_result
+============================================================
+26. IMPORTANT: DO NOT OVERENGINEER V1
+
+Version 1 should NOT attempt to solve every possible physical illumination problem.
+
+Do NOT initially implement:
+
+physically based rendering
+neural image generation
+diffusion models
+3D reconstruction
+complicated relighting
+sophisticated atmospheric simulation
+
+The purpose of V1 is controlled counterfactual illumination augmentation.
+
+The simplest convincing transformation is preferable to a complicated transformation that introduces artifacts.
+
+============================================================
+27. PILOT REQUIREMENT
+
+Before full dataset generation, generate a pilot of approximately:
+
+50–100 synthetic images
+
+with approximately:
+
+40% confounder-heavy
+
+and a mixture of:
+
+dim
+severe_dim
+flicker
+off
+
+Generate preview comparisons.
+
+STOP after the pilot.
+
+Do not automatically proceed to full dataset generation.
+
+The human researcher must inspect the pilot first.
+
+============================================================
+28. FINAL DELIVERABLES
+
+At completion of implementation provide:
+
+List of files added.
+List of files modified.
+CLI usage examples.
+Configuration example.
+Dataset-generation workflow.
+Test results.
+Pilot-generation command.
+Explanation of the duplicate filtering method.
+Explanation of confounder classification.
+Explanation of how annotations are inherited.
+Explanation of limitations and any assumptions.
+Exact location of generated metadata and reports.
+
+Do not claim that the pipeline is scientifically validated merely because the code runs.
+
+The research validation comes later through controlled experiments on the real held-out dataset.

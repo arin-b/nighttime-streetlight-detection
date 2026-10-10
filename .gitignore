@@ -4,4 +4,9 @@ runs/
 datasets/
 configs/
 models/
+!src/detection/models/
+!src/detection/models/*.py
 documentation/
+synthetic_output/
+__pycache__/
+*.py[cod]

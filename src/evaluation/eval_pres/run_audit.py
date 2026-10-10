@@ -1069,10 +1069,10 @@ def main() -> None:
 
         print(f"       mAP@0.5: {map_results['AP@0.5']}")
         print(f"       mAP@0.5:0.95: {map_results['mAP@0.5:0.95']}")
-        print(f"       Precision: {agg_det.precision:.4f}")
-        print(f"       Recall: {agg_det.recall:.4f}")
-        print(f"       F1: {agg_det.f1:.4f}")
-        print(f"       TP/FP/FN @ IoU=0.5: {agg_det.tp}/{agg_det.fp}/{agg_det.fn}")
+        print(f"       Precision: {agg_det_dict['precision']:.4f}")
+        print(f"       Recall: {agg_det_dict['recall']:.4f}")
+        print(f"       F1: {agg_det_dict['f1']:.4f}")
+        print(f"       TP/FP/FN @ IoU=0.5: {agg_det_dict['tp']}/{agg_det_dict['fp']}/{agg_det_dict['fn']}")
         print()
     else:
         print("[5/6] Skipping evaluation (no ground-truth labels provided)")

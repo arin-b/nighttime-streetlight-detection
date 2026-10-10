@@ -194,3 +194,31 @@ Following a recent architectural merger, the core systems reside in:
 
 ---
 *Developed by the RBCCPS Computer Vision Team.*
+
+---
+
+## Synthetic illumination training data
+
+The synthesis pipeline creates a separate, auditable training-only pool of
+counterfactual lamp states. It never changes the real source images, labels, or
+validation/test split. The supplied pilot configuration reads the existing
+YOLOv26m training split, uses soft local masks over the luminaire region, and
+copies YOLO detection labels unchanged.
+
+```bash
+# Inspect selection and the 40% confounder-heavy quota without writing files.
+python3 -m rbccps_od generate-synthetic generate \
+  --config configs/synthetic/synthetic_data.yaml --dry-run
+
+# Produce only a reviewable pilot, including ORIGINAL | MASK | SYNTHETIC sheets.
+python3 -m rbccps_od generate-synthetic generate \
+  --config configs/synthetic/synthetic_data.yaml --limit 50 --preview
+
+python3 -m rbccps_od generate-synthetic stats \
+  --metadata datasets/derived/synthetic_illumination_v1/metadata.jsonl
+```
+
+Set source timestamp/video/scene fields in `source_manifest` when they are
+available. The recorded extraction command is `ffmpeg -i video.mp4 fps=1
+frames/frame\_%06d.jpg`; filenames alone do not establish presentation
+timestamps, so missing timestamps are explicitly stored as `null`.
